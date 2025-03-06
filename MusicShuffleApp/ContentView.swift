@@ -16,7 +16,7 @@ struct ContentView: View {
     @State private var isAuthorized = false
     @State private var showError = false
     @State private var errorMessage = ""
-
+    
     var body: some View {
         NavigationView {
             List {
@@ -24,7 +24,7 @@ struct ContentView: View {
                 NavigationLink(destination: AllSongsView()) {
                     Text("All Songs")
                 }
-
+                
                 ForEach(playlists, id: \.persistentID) { playlist in
                     NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: playlist)) {
                         Text(playlist.name ?? "Unknown Playlist")
@@ -100,6 +100,10 @@ class MusicPlayerHelper: ObservableObject {
     }
 
     func reorderBasedOnProbabilityIndexes(_ days: [Int]) -> [Int] {
+        if days.allSatisfy({ $0 == -1 }){
+            return Array(0..<days.count)
+        }
+        
         // Step 1: Separate non-zero elements and their indexes
         let indexedDays = days.enumerated().filter { $0.element > 0 }  // [(index, value)]
         let zeroIndexes = days.enumerated().filter { $0.element == 0 }.map { $0.offset } // [index of zeros]
