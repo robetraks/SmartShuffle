@@ -205,6 +205,7 @@ class MusicPlayerHelper: ObservableObject {
 struct SongListView: View {
     let songs: [MPMediaItem]
     @ObservedObject var musicPlayerHelper: MusicPlayerHelper
+    let playlistInfoCard: AnyView
 
     var body: some View {
         VStack {
@@ -239,6 +240,8 @@ struct SongListView: View {
                     .padding()
             }
 
+            playlistInfoCard
+
             Button("Play in Apple Music") {
                 musicPlayerHelper.isLoading = true
                 musicPlayerHelper.playSongs()
@@ -263,13 +266,15 @@ struct PlaylistView: View {
     @ObservedObject private var musicPlayerHelper = MusicPlayerHelper()
 
     var body: some View {
-        SongListView(songs: playlistSongs, musicPlayerHelper: musicPlayerHelper)
-            .onAppear {
-                fetchPlaylistSongs()
-            }
-            .onDisappear {
-                musicPlayerHelper.timer?.invalidate()
-            }
+        VStack {
+            SongListView(songs: playlistSongs, musicPlayerHelper: musicPlayerHelper, playlistInfoCard: playlistInfoCard)
+        }
+        .onAppear {
+            fetchPlaylistSongs()
+        }
+        .onDisappear {
+            musicPlayerHelper.timer?.invalidate()
+        }
     }
 
     private func fetchPlaylistSongs() {
@@ -278,6 +283,65 @@ struct PlaylistView: View {
         musicPlayerHelper.shuffleSongs()
         playlistSongs = musicPlayerHelper.shuffledSongs
     }
+
+    private var playlistInfoCard: AnyView {
+        let totalDuration = playlistSongs.reduce(0) { $0 + $1.playbackDuration }
+        let playedDuration = playlistSongs.reduce(0.0) { result, item in
+            let count = item.playCount
+            return result + (Double(count) * item.playbackDuration)
+        }
+        let affinityScore = playlistSongs.isEmpty ? 0 : playedDuration / Double(playlistSongs.count)
+        let mostPlayedSong = playlistSongs.max(by: { $0.playCount < $1.playCount })
+
+        let columns = [GridItem(.flexible()), GridItem(.flexible())]
+
+        return AnyView(
+            VStack(alignment: .leading, spacing: 16) {
+                LazyVGrid(columns: columns, spacing: 16) {
+                    Label("\(playlistSongs.count)", systemImage: "music.note.list")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Songs"))
+
+                    Label(formatTime(totalDuration), systemImage: "clock")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Total Duration"))
+
+                    Label(formatTime(playedDuration), systemImage: "play.circle")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Played"))
+
+                    Label(formatTime(affinityScore), systemImage: "star.fill")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Affinity Score"))
+                }
+
+                if let song = mostPlayedSong {
+                    Divider()
+                    Text("Most Played Song")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    Text(song.title ?? "Unknown")
+                        .font(.body)
+                }
+            }
+            .padding()
+            .background(Color.blue.opacity(0.2))
+            .cornerRadius(10)
+            .padding(.horizontal)
+            .frame(maxWidth: .infinity)
+        )
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        if time >= 86400 {
+            let days = time / 86400
+            return String(format: "%.1f days", days)
+        }
+        let hours = Int(time) / 3600
+        let minutes = (Int(time) % 3600) / 60
+
+        if hours > 0 {
+            return String(format: "%02dh %02dm", hours, minutes)
+        } else {
+            return String(format: "%02dm", minutes)
+        }
+    }
 }
 
 struct AllSongsView: View {
@@ -285,7 +349,7 @@ struct AllSongsView: View {
     @ObservedObject private var musicPlayerHelper = MusicPlayerHelper()
 
     var body: some View {
-        SongListView(songs: allSongs, musicPlayerHelper: musicPlayerHelper)
+        SongListView(songs: allSongs, musicPlayerHelper: musicPlayerHelper, playlistInfoCard: playlistInfoCard)
             .onAppear {
                 fetchAllSongs()
             }
@@ -302,5 +366,81 @@ struct AllSongsView: View {
         musicPlayerHelper.nonShuffledSongs = allSongs
         musicPlayerHelper.shuffleSongs()
         allSongs = musicPlayerHelper.shuffledSongs
+    }
+
+    private var playlistInfoCard: AnyView {
+        let totalDuration = allSongs.reduce(0) { $0 + $1.playbackDuration }
+        let playedDuration = allSongs.reduce(0.0) { result, item in
+            let count = item.playCount
+            return result + (Double(count) * item.playbackDuration)
+        }
+        let affinityScore = allSongs.isEmpty ? 0 : playedDuration / Double(allSongs.count)
+        let mostPlayedSong = allSongs.max(by: { $0.playCount < $1.playCount })
+
+        let columns = [GridItem(.flexible()), GridItem(.flexible())]
+
+        return AnyView(
+            VStack(alignment: .leading, spacing: 16) {
+                LazyVGrid(columns: columns, spacing: 16) {
+                    Label("\(allSongs.count)", systemImage: "music.note.list")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Songs"))
+
+                    Label(formatTime(totalDuration), systemImage: "clock")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Total Duration"))
+
+                    Label(formatTime(playedDuration), systemImage: "play.circle")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Played"))
+
+                    Label(formatTime(affinityScore), systemImage: "star.fill")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Affinity Score"))
+                }
+
+                if let song = mostPlayedSong {
+                    Divider()
+                    Text("Most Played Song")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    Text(song.title ?? "Unknown")
+                        .font(.body)
+                }
+            }
+            .padding()
+            .background(Color.blue.opacity(0.2))
+            .cornerRadius(10)
+            .padding(.horizontal)
+            .frame(maxWidth: .infinity)
+        )
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        if time >= 86400 {
+            let days = time / 86400
+            return String(format: "%.1f days", days)
+        }
+        let hours = Int(time) / 3600
+        let minutes = (Int(time) % 3600) / 60
+
+        if hours > 0 {
+            return String(format: "%02dh %02dm", hours, minutes)
+        } else {
+            return String(format: "%02dm", minutes)
+        }
+    }
+}
+
+// Custom LabelStyle for vertical metrics with icon, value, and title
+struct VerticalMetricLabelStyle: LabelStyle {
+    var title: String
+    func makeBody(configuration: Configuration) -> some View {
+        VStack {
+            configuration.icon
+                .font(.title2)
+            configuration.title
+                .font(.headline)
+            Text(title)
+                .font(.caption2)
+                .foregroundColor(.gray)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
