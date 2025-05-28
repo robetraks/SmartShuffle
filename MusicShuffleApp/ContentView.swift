@@ -20,11 +20,21 @@ struct ContentView: View {
     var body: some View {
         NavigationView {
             List {
+                // Playlist Stats button at the top
+                Section {
+                    NavigationLink(destination: PlaylistStatsView(playlists: playlists)) {
+                        HStack {
+                            Image(systemName: "chart.bar")
+                            Text("Playlist Stats")
+                                .bold()
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
                 // Add an entry for "All Songs"
                 NavigationLink(destination: AllSongsView()) {
                     Text("All Songs")
                 }
-                
                 ForEach(playlists, id: \.persistentID) { playlist in
                     NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: playlist)) {
                         Text(playlist.name ?? "Unknown Playlist")
@@ -293,20 +303,15 @@ struct PlaylistView: View {
         let affinityScore = playlistSongs.isEmpty ? 0 : playedDuration / Double(playlistSongs.count)
         let mostPlayedSong = playlistSongs.max(by: { $0.playCount < $1.playCount })
 
-        let columns = [GridItem(.flexible()), GridItem(.flexible())]
-
         return AnyView(
             VStack(alignment: .leading, spacing: 16) {
-                LazyVGrid(columns: columns, spacing: 16) {
+                HStack(spacing: 24) {
                     Label("\(playlistSongs.count)", systemImage: "music.note.list")
                         .labelStyle(VerticalMetricLabelStyle(title: "Songs"))
-
                     Label(formatTime(totalDuration), systemImage: "clock")
                         .labelStyle(VerticalMetricLabelStyle(title: "Total Duration"))
-
                     Label(formatTime(playedDuration), systemImage: "play.circle")
                         .labelStyle(VerticalMetricLabelStyle(title: "Played"))
-
                     Label(formatTime(affinityScore), systemImage: "star.fill")
                         .labelStyle(VerticalMetricLabelStyle(title: "Affinity Score"))
                 }
@@ -316,7 +321,7 @@ struct PlaylistView: View {
                     Text("Most Played Song")
                         .font(.caption)
                         .foregroundColor(.gray)
-                    Text(song.title ?? "Unknown")
+                    Text("\(song.title ?? "Unknown") (\(song.playCount) plays)")
                         .font(.body)
                 }
             }
@@ -377,20 +382,15 @@ struct AllSongsView: View {
         let affinityScore = allSongs.isEmpty ? 0 : playedDuration / Double(allSongs.count)
         let mostPlayedSong = allSongs.max(by: { $0.playCount < $1.playCount })
 
-        let columns = [GridItem(.flexible()), GridItem(.flexible())]
-
         return AnyView(
             VStack(alignment: .leading, spacing: 16) {
-                LazyVGrid(columns: columns, spacing: 16) {
+                HStack(spacing: 24) {
                     Label("\(allSongs.count)", systemImage: "music.note.list")
                         .labelStyle(VerticalMetricLabelStyle(title: "Songs"))
-
                     Label(formatTime(totalDuration), systemImage: "clock")
                         .labelStyle(VerticalMetricLabelStyle(title: "Total Duration"))
-
                     Label(formatTime(playedDuration), systemImage: "play.circle")
                         .labelStyle(VerticalMetricLabelStyle(title: "Played"))
-
                     Label(formatTime(affinityScore), systemImage: "star.fill")
                         .labelStyle(VerticalMetricLabelStyle(title: "Affinity Score"))
                 }
@@ -400,7 +400,7 @@ struct AllSongsView: View {
                     Text("Most Played Song")
                         .font(.caption)
                         .foregroundColor(.gray)
-                    Text(song.title ?? "Unknown")
+                    Text("\(song.title ?? "Unknown") (\(song.playCount) plays)")
                         .font(.body)
                 }
             }
@@ -442,5 +442,100 @@ struct VerticalMetricLabelStyle: LabelStyle {
                 .foregroundColor(.gray)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+// PlaylistStatsView: Shows stats for all playlists in a card-based, sortable layout
+struct PlaylistStatsView: View {
+    let playlists: [MPMediaPlaylist]
+
+    enum SortOption: String, CaseIterable, Identifiable {
+        case name = "Name"
+        case songs = "Songs"
+        case affinity = "Affinity"
+        case total = "Total"
+        case played = "Played"
+        var id: String { rawValue }
+    }
+
+    @State private var sortOption: SortOption = .songs
+
+    struct Stats: Identifiable {
+        let id = UUID()
+        let name: String
+        let songCount: Int
+        let totalDuration: TimeInterval
+        let playedDuration: TimeInterval
+        let affinityScore: TimeInterval
+    }
+
+    var sortedStats: [Stats] {
+        let base = playlists.map { playlist in
+            let songs = playlist.items
+            let total = songs.reduce(0) { $0 + $1.playbackDuration }
+            let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
+            let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
+            return Stats(name: playlist.name ?? "Unknown", songCount: songs.count, totalDuration: total, playedDuration: played, affinityScore: affinity)
+        }
+        switch sortOption {
+        case .name:
+            return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .songs:
+            return base.sorted { $0.songCount > $1.songCount }
+        case .affinity:
+            return base.sorted { $0.affinityScore > $1.affinityScore }
+        case .total:
+            return base.sorted { $0.totalDuration > $1.totalDuration }
+        case .played:
+            return base.sorted { $0.playedDuration > $1.playedDuration }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            Picker("Sort by", selection: $sortOption) {
+                ForEach(SortOption.allCases) { option in
+                    Text(option.rawValue).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(sortedStats) { stat in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(stat.name)
+                                .font(.headline)
+
+                            HStack(spacing: 16) {
+                                Label("\(stat.songCount)", systemImage: "music.note.list")
+                                Label(formatTime(stat.affinityScore), systemImage: "star.fill")
+                                Label(formatTime(stat.totalDuration), systemImage: "clock")
+                                Label(formatTime(stat.playedDuration), systemImage: "play.circle")
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
+                        .padding(.horizontal)
+                    }
+                }
+                .padding(.top)
+            }
+        }
+        .navigationTitle("Playlist Stats")
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        if time >= 86400 {
+            let days = time / 86400
+            return String(format: "%.1f d", days)
+        }
+        let hours = Int(time) / 3600
+        let minutes = (Int(time) % 3600) / 60
+        return hours > 0 ? String(format: "%02dh %02dm", hours, minutes) : String(format: "%02dm", minutes)
     }
 }
