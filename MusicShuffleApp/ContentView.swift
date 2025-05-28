@@ -427,6 +427,7 @@ struct VerticalMetricLabelStyle: LabelStyle {
 struct PlaylistStatsView: View {
     @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
+    @ObservedObject private var musicPlayerHelper = MusicPlayerHelper()
 
     enum SortOption: String, CaseIterable, Identifiable {
         case name = "Name"
@@ -483,7 +484,8 @@ struct PlaylistStatsView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(sortedStats, id: \.id) { stat in
-                        NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)) {
+                        HStack(spacing: 0) {
+                            // Card area (excluding chevron)
                             HStack {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text(stat.name)
@@ -499,15 +501,28 @@ struct PlaylistStatsView: View {
                                     .foregroundColor(.secondary)
                                 }
                                 Spacer()
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                musicPlayerHelper.nonShuffledSongs = stat.playlist.items
+                                musicPlayerHelper.shuffleSongs()
+                                musicPlayerHelper.playSongs()
+                                musicPlayerHelper.openAppleMusic()
+                            }
+                            // Chevron NavigationLink
+                            NavigationLink(
+                                destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)
+                            ) {
                                 Image(systemName: "chevron.right")
                                     .foregroundColor(.gray)
+                                    .padding(.leading, 8)
                             }
-                            .padding()
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
-                            .padding(.horizontal)
+                            .buttonStyle(PlainButtonStyle())
                         }
-                        .buttonStyle(PlainButtonStyle())
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
+                        .padding(.horizontal)
                     }
                 }
                 .animation(.easeInOut(duration: 0.3), value: sortOption)
@@ -539,37 +554,47 @@ struct PlaylistStatsView: View {
                 .padding(.vertical, 8)
                 .padding(.horizontal)
 
-            // "All Songs" card-style NavigationLink after the Picker
-            NavigationLink(destination: AllSongsView()) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("All Songs")
-                            .font(.headline)
+            // "All Songs" card-style: tap anywhere (except chevron) to play in Apple Music, chevron navigates
+            HStack {
+                // Tappable area for play in Apple Music
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("All Songs")
+                        .font(.headline)
 
-                        let songs = MPMediaQuery.songs().items ?? []
-                        let total = songs.reduce(0) { $0 + $1.playbackDuration }
-                        let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
-                        let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
+                    let songs = MPMediaQuery.songs().items ?? []
+                    let total = songs.reduce(0) { $0 + $1.playbackDuration }
+                    let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
+                    let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
 
-                        HStack(spacing: 16) {
-                            Label("\(songs.count)", systemImage: "music.note.list")
-                            Label(formatTime(affinity), systemImage: "star.fill")
-                            Label(formatTime(total), systemImage: "clock")
-                            Label(formatTime(played), systemImage: "play.circle")
-                        }
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 16) {
+                        Label("\(songs.count)", systemImage: "music.note.list")
+                        Label(formatTime(affinity), systemImage: "star.fill")
+                        Label(formatTime(total), systemImage: "clock")
+                        Label(formatTime(played), systemImage: "play.circle")
                     }
-                    Spacer()
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    musicPlayerHelper.nonShuffledSongs = MPMediaQuery.songs().items ?? []
+                    musicPlayerHelper.shuffleSongs()
+                    musicPlayerHelper.playSongs()
+                    musicPlayerHelper.openAppleMusic()
+                }
+                Spacer()
+                // Chevron NavigationLink
+                NavigationLink(destination: AllSongsView()) {
                     Image(systemName: "chevron.right")
                         .foregroundColor(.gray)
+                        .padding(.leading, 8)
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
-                .padding(.horizontal)
+                .buttonStyle(PlainButtonStyle())
             }
-            .buttonStyle(PlainButtonStyle())
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
+            .padding(.horizontal)
         }
     }
 
