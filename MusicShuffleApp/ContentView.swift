@@ -19,32 +19,10 @@ struct ContentView: View {
     
     var body: some View {
         NavigationView {
-            List {
-                // Playlist Stats button at the top
-                Section {
-                    NavigationLink(destination: PlaylistStatsView(playlists: playlists)) {
-                        HStack {
-                            Image(systemName: "chart.bar")
-                            Text("Playlist Stats")
-                                .bold()
-                        }
-                        .padding(.vertical, 8)
-                    }
+            PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: playlists)
+                .onAppear {
+                    requestAuthorization()
                 }
-                // Add an entry for "All Songs"
-                NavigationLink(destination: AllSongsView()) {
-                    Text("All Songs")
-                }
-                ForEach(playlists, id: \.persistentID) { playlist in
-                    NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: playlist)) {
-                        Text(playlist.name ?? "Unknown Playlist")
-                    }
-                }
-            }
-            .navigationTitle("Playlists")
-            .onAppear {
-                requestAuthorization()
-            }
         }
         .alert("Error", isPresented: $showError) {
             Button("OK", role: .cancel) { }
@@ -447,6 +425,7 @@ struct VerticalMetricLabelStyle: LabelStyle {
 
 // PlaylistStatsView: Shows stats for all playlists in a card-based, sortable layout
 struct PlaylistStatsView: View {
+    @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
 
     enum SortOption: String, CaseIterable, Identifiable {
@@ -458,11 +437,12 @@ struct PlaylistStatsView: View {
         var id: String { rawValue }
     }
 
-    @State private var sortOption: SortOption = .songs
+    @State private var sortOption: SortOption = .name
 
     struct Stats: Identifiable {
         let id = UUID()
-        let name: String
+        let playlist: MPMediaPlaylist
+        var name: String { playlist.name ?? "Unknown" }
         let songCount: Int
         let totalDuration: TimeInterval
         let playedDuration: TimeInterval
@@ -475,8 +455,9 @@ struct PlaylistStatsView: View {
             let total = songs.reduce(0) { $0 + $1.playbackDuration }
             let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
             let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
-            return Stats(name: playlist.name ?? "Unknown", songCount: songs.count, totalDuration: total, playedDuration: played, affinityScore: affinity)
+            return Stats(playlist: playlist, songCount: songs.count, totalDuration: total, playedDuration: played, affinityScore: affinity)
         }
+
         switch sortOption {
         case .name:
             return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -493,40 +474,103 @@ struct PlaylistStatsView: View {
 
     var body: some View {
         VStack(alignment: .leading) {
+            // Heading at the top
+            Text("Playlists")
+                .font(.largeTitle)
+                .bold()
+                .padding(.horizontal)
+
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(sortedStats, id: \.id) { stat in
+                        NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(stat.name)
+                                        .font(.headline)
+
+                                    HStack(spacing: 16) {
+                                        Label("\(stat.songCount)", systemImage: "music.note.list")
+                                        Label(formatTime(stat.affinityScore), systemImage: "star.fill")
+                                        Label(formatTime(stat.totalDuration), systemImage: "clock")
+                                        Label(formatTime(stat.playedDuration), systemImage: "play.circle")
+                                    }
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.gray)
+                            }
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
+                            .padding(.horizontal)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .animation(.easeInOut(duration: 0.3), value: sortOption)
+                .padding(.top)
+            }
+
+            Divider()
+                .background(Color.gray.opacity(0.3))
+                .frame(height: 1)
+                .padding(.vertical, 8)
+                .padding(.horizontal)
+
+            // Sort picker moved below playlist cards
             Picker("Sort by", selection: $sortOption) {
                 ForEach(SortOption.allCases) { option in
                     Text(option.rawValue).tag(option)
                 }
             }
             .pickerStyle(.segmented)
+            .padding()
+            .background(Color.green.opacity(0.2))
+            .cornerRadius(10)
+            .frame(height: 50)
             .padding(.horizontal)
 
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(sortedStats) { stat in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(stat.name)
-                                .font(.headline)
+            Divider()
+                .background(Color.gray.opacity(0.3))
+                .frame(height: 1)
+                .padding(.vertical, 8)
+                .padding(.horizontal)
 
-                            HStack(spacing: 16) {
-                                Label("\(stat.songCount)", systemImage: "music.note.list")
-                                Label(formatTime(stat.affinityScore), systemImage: "star.fill")
-                                Label(formatTime(stat.totalDuration), systemImage: "clock")
-                                Label(formatTime(stat.playedDuration), systemImage: "play.circle")
-                            }
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+            // "All Songs" card-style NavigationLink after the Picker
+            NavigationLink(destination: AllSongsView()) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("All Songs")
+                            .font(.headline)
+
+                        let songs = MPMediaQuery.songs().items ?? []
+                        let total = songs.reduce(0) { $0 + $1.playbackDuration }
+                        let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
+                        let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
+
+                        HStack(spacing: 16) {
+                            Label("\(songs.count)", systemImage: "music.note.list")
+                            Label(formatTime(affinity), systemImage: "star.fill")
+                            Label(formatTime(total), systemImage: "clock")
+                            Label(formatTime(played), systemImage: "play.circle")
                         }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
-                        .padding(.horizontal)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
                     }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(.gray)
                 }
-                .padding(.top)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
+                .padding(.horizontal)
             }
+            .buttonStyle(PlainButtonStyle())
         }
-        .navigationTitle("Playlist Stats")
     }
 
     private func formatTime(_ time: TimeInterval) -> String {
