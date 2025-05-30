@@ -210,16 +210,26 @@ struct SongListView: View {
                             .background(Color.gray.opacity(0.2))
                             .cornerRadius(4)
                     }
-                    
-                    VStack(alignment: .leading) {
-                        Text(song.title ?? "Unknown Song")
-                            .font(.body)
-                        Text(song.artist ?? "Unknown Artist")
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(song.title ?? "Unknown Song")
+                                .font(.body)
+                            Text(song.artist ?? "Unknown Artist")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            if let lastPlayed = song.lastPlayedDate {
+                                Text(lastPlayed.formatted(date: .abbreviated, time: .omitted))
+                                    .font(.caption2)
+                                    .foregroundColor(.gray)
+                            }
+                            Text("\(song.playCount) plays")
+                                .font(.caption2)
+                                .foregroundColor(.gray)
+                        }
                     }
-                    
-                    Spacer()
                 }
             }
 
