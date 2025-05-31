@@ -88,52 +88,30 @@ class MusicPlayerHelper: ObservableObject {
     }
 
     func reorderBasedOnProbabilityIndexes(_ days: [Int]) -> [Int] {
-        if days.allSatisfy({ $0 == -1 }){
+        if days.allSatisfy({ $0 == -1 }) {
             return Array(0..<days.count)
         }
-        
-        // Step 1: Separate non-zero elements and their indexes
-        let indexedDays = days.enumerated().filter { $0.element > 0 }  // [(index, value)]
-        let zeroIndexes = days.enumerated().filter { $0.element == 0 }.map { $0.offset } // [index of zeros]
 
-        // Step 2: Sort non-zero elements in descending order while keeping their original indexes
-        let sortedIndexedDays = indexedDays.sorted { $0.element > $1.element } // [(index, value)]
-        
-        // Step 3: Calculate probabilities for non-zero elements
-        let totalSum = sortedIndexedDays.reduce(0) { $0 + $1.element }
-        let probabilities = sortedIndexedDays.map { Double($0.element) / Double(totalSum) } // Probabilities
+        let zeroIndexes = days.enumerated().filter { $0.element == 0 }.map { $0.offset }
+        let nonZeroIndexedDays = days.enumerated().filter { $0.element > 0 || $0.element == -1 }
 
-        // Step 4: Randomly pick indexes of non-zero elements based on probabilities
-        var indexes = Array(0..<sortedIndexedDays.count) // Track available indexes
-        var selectedIndexes: [Int] = [] // Result array (stores original indexes)
-        var remainingProbabilities = probabilities
+        let maxValue = days.max() ?? 1
+        let adjustedDays = nonZeroIndexedDays.map { $0.element < 0 ? maxValue : $0.element }
+        let weights = adjustedDays.map { Double($0 + 1) } // avoid zero
+        let totalWeight = weights.reduce(0, +)
+        let probabilities = weights.map { $0 / totalWeight }
 
-        while !remainingProbabilities.isEmpty {
-            let randomValue = Double.random(in: 0..<1) // Generate random number
-            var cumulativeProbability = 0.0
-            var pickedIndex = -1
+        var gumbelScores: [(index: Int, score: Double)] = []
 
-            // Find the index matching the random value
-            for (index, probability) in remainingProbabilities.enumerated() {
-                cumulativeProbability += probability
-                if randomValue < cumulativeProbability {
-                    pickedIndex = index
-                    break
-                }
-            }
-
-            // Add the selected index and remove it from the remaining lists
-            if pickedIndex != -1 {
-                selectedIndexes.append(sortedIndexedDays[indexes[pickedIndex]].offset) // Add the original index
-                remainingProbabilities.remove(at: pickedIndex)
-                indexes.remove(at: pickedIndex)
-            }
+        for (i, prob) in probabilities.enumerated() {
+            let u = Double.random(in: 0..<1)
+            let gumbelNoise = -log(-log(u))
+            let score = log(prob) + gumbelNoise
+            gumbelScores.append((index: nonZeroIndexedDays[i].offset, score: score))
         }
 
-        // Step 5: Append zero indexes at the end
-        selectedIndexes.append(contentsOf: zeroIndexes)
-
-        return selectedIndexes
+        let sorted = gumbelScores.sorted { $0.score > $1.score }.map { $0.index }
+        return sorted + zeroIndexes
     }
 
     private func getDaysFromLastPlayed() -> [Int] {
@@ -438,6 +416,7 @@ struct PlaylistStatsView: View {
     @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
 
+
     enum SortOption: String, CaseIterable, Identifiable {
         case name = "Name"
         case songs = "Songs"
@@ -498,7 +477,7 @@ struct PlaylistStatsView: View {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text(stat.name)
                                         .font(.headline)
-
+                                        .foregroundColor(.primary)
                                     HStack(spacing: 16) {
                                         Label("\(stat.songCount)", systemImage: "music.note.list")
                                         Label(formatTime(stat.affinityScore), systemImage: "star.fill")
@@ -517,7 +496,12 @@ struct PlaylistStatsView: View {
                             .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
                             .padding(.horizontal)
                         }
-                        .buttonStyle(PlainButtonStyle())
+                        .contextMenu {
+                            Button("Play Now") {
+                                selectedPlaylist = stat.playlist
+                                playPlaylist(stat.playlist)
+                            }
+                        }
                     }
                 }
                 .animation(.easeInOut(duration: 0.3), value: sortOption)
@@ -549,18 +533,16 @@ struct PlaylistStatsView: View {
                 .padding(.vertical, 8)
                 .padding(.horizontal)
 
-            // "All Songs" card-style NavigationLink after the Picker
+            // "All Songs" card-style NavigationLink after the Picker, with contextMenu
             NavigationLink(destination: AllSongsView()) {
                 HStack {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("All Songs")
                             .font(.headline)
-
                         let songs = MPMediaQuery.songs().items ?? []
                         let total = songs.reduce(0) { $0 + $1.playbackDuration }
                         let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
                         let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
-
                         HStack(spacing: 16) {
                             Label("\(songs.count)", systemImage: "music.note.list")
                             Label(formatTime(affinity), systemImage: "star.fill")
@@ -579,6 +561,16 @@ struct PlaylistStatsView: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
                 .padding(.horizontal)
             }
+            .contextMenu {
+                Button("Play Now") {
+                    let helper = MusicPlayerHelper()
+                    let songs = MPMediaQuery.songs().items ?? []
+                    helper.nonShuffledSongs = songs
+                    helper.shuffleSongs()
+                    helper.shuffledSongs = helper.shuffledSongs
+                    helper.playSongs()
+                }
+            }
             .buttonStyle(PlainButtonStyle())
         }
     }
@@ -591,5 +583,13 @@ struct PlaylistStatsView: View {
         let hours = Int(time) / 3600
         let minutes = (Int(time) % 3600) / 60
         return hours > 0 ? String(format: "%02dh %02dm", hours, minutes) : String(format: "%02dm", minutes)
+    }
+
+    private func playPlaylist(_ playlist: MPMediaPlaylist) {
+        let helper = MusicPlayerHelper()
+        helper.nonShuffledSongs = playlist.items
+        helper.shuffleSongs()
+        helper.shuffledSongs = helper.shuffledSongs
+        helper.playSongs()
     }
 }
