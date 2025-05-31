@@ -416,6 +416,8 @@ struct PlaylistStatsView: View {
     @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
 
+    @State private var selectedPlaylistIDs: Set<UInt64> = []
+    @State private var isSelectMode = false
 
     enum SortOption: String, CaseIterable, Identifiable {
         case name = "Name"
@@ -439,7 +441,10 @@ struct PlaylistStatsView: View {
     }
 
     var sortedStats: [Stats] {
-        let base = playlists.map { playlist in
+        let visiblePlaylists = isSelectMode ? playlists : playlists.filter {
+            selectedPlaylistIDs.isEmpty || selectedPlaylistIDs.contains($0.persistentID)
+        }
+        let base = visiblePlaylists.map { playlist in
             let songs = playlist.items
             let total = songs.reduce(0) { $0 + $1.playbackDuration }
             let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
@@ -463,6 +468,13 @@ struct PlaylistStatsView: View {
 
     var body: some View {
         VStack(alignment: .leading) {
+            HStack {
+                Spacer()
+                Button(isSelectMode ? "Done" : "Select") {
+                    isSelectMode.toggle()
+                }
+                .padding(.trailing)
+            }
             // Heading at the top
             Text("Playlists")
                 .font(.largeTitle)
@@ -472,34 +484,50 @@ struct PlaylistStatsView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(sortedStats, id: \.id) { stat in
-                        NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(stat.name)
-                                        .font(.headline)
-                                        .foregroundColor(.primary)
-                                    HStack(spacing: 16) {
-                                        Label("\(stat.songCount)", systemImage: "music.note.list")
-                                        Label(formatTime(stat.affinityScore), systemImage: "star.fill")
-                                        Label(formatTime(stat.totalDuration), systemImage: "clock")
-                                        Label(formatTime(stat.playedDuration), systemImage: "play.circle")
+                        HStack {
+                            if isSelectMode {
+                                Button(action: {
+                                    let id = stat.playlist.persistentID
+                                    if selectedPlaylistIDs.contains(id) {
+                                        selectedPlaylistIDs.remove(id)
+                                    } else {
+                                        selectedPlaylistIDs.insert(id)
                                     }
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
+                                }) {
+                                    Image(systemName: selectedPlaylistIDs.contains(stat.playlist.persistentID) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(selectedPlaylistIDs.contains(stat.playlist.persistentID) ? .blue : .gray)
                                 }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundColor(.gray)
+                                .padding(.leading)
                             }
-                            .padding()
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
-                            .padding(.horizontal)
-                        }
-                        .contextMenu {
-                            Button("Play Now") {
-                                selectedPlaylist = stat.playlist
-                                playPlaylist(stat.playlist)
+                            NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text(stat.name)
+                                            .font(.headline)
+                                            .foregroundColor(.primary)
+                                        HStack(spacing: 16) {
+                                            Label("\(stat.songCount)", systemImage: "music.note.list")
+                                            Label(formatTime(stat.affinityScore), systemImage: "star.fill")
+                                            Label(formatTime(stat.totalDuration), systemImage: "clock")
+                                            Label(formatTime(stat.playedDuration), systemImage: "play.circle")
+                                        }
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(.gray)
+                                }
+                                .padding()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
+                                .padding(.horizontal)
+                            }
+                            .contextMenu {
+                                Button("Play Now") {
+                                    selectedPlaylist = stat.playlist
+                                    playPlaylist(stat.playlist)
+                                }
                             }
                         }
                     }
