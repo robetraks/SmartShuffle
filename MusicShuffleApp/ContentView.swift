@@ -416,8 +416,20 @@ struct PlaylistStatsView: View {
     @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
 
+    @AppStorage("selectedPlaylistIDs") private var selectedPlaylistIDsRaw: String = ""
     @State private var selectedPlaylistIDs: Set<UInt64> = []
+
+    private func loadSelectedPlaylistIDs() {
+        let ids = selectedPlaylistIDsRaw.split(separator: ",").compactMap { UInt64($0) }
+        selectedPlaylistIDs = Set(ids)
+    }
+
+    private func saveSelectedPlaylistIDs() {
+        selectedPlaylistIDsRaw = selectedPlaylistIDs.map { String($0) }.joined(separator: ",")
+    }
     @State private var isSelectMode = false
+    // Local copy for mutation in view
+    @State private var localSelectedIDs: Set<UInt64> = []
 
     enum SortOption: String, CaseIterable, Identifiable {
         case name = "Name"
@@ -442,7 +454,7 @@ struct PlaylistStatsView: View {
 
     var sortedStats: [Stats] {
         let visiblePlaylists = isSelectMode ? playlists : playlists.filter {
-            selectedPlaylistIDs.isEmpty || selectedPlaylistIDs.contains($0.persistentID)
+            localSelectedIDs.isEmpty || localSelectedIDs.contains($0.persistentID)
         }
         let base = visiblePlaylists.map { playlist in
             let songs = playlist.items
@@ -488,14 +500,14 @@ struct PlaylistStatsView: View {
                             if isSelectMode {
                                 Button(action: {
                                     let id = stat.playlist.persistentID
-                                    if selectedPlaylistIDs.contains(id) {
-                                        selectedPlaylistIDs.remove(id)
+                                    if localSelectedIDs.contains(id) {
+                                        localSelectedIDs.remove(id)
                                     } else {
-                                        selectedPlaylistIDs.insert(id)
+                                        localSelectedIDs.insert(id)
                                     }
                                 }) {
-                                    Image(systemName: selectedPlaylistIDs.contains(stat.playlist.persistentID) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundColor(selectedPlaylistIDs.contains(stat.playlist.persistentID) ? .blue : .gray)
+                                    Image(systemName: localSelectedIDs.contains(stat.playlist.persistentID) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(localSelectedIDs.contains(stat.playlist.persistentID) ? .blue : .gray)
                                 }
                                 .padding(.leading)
                             }
@@ -600,6 +612,14 @@ struct PlaylistStatsView: View {
                 }
             }
             .buttonStyle(PlainButtonStyle())
+        }
+        .onAppear {
+            loadSelectedPlaylistIDs()
+            localSelectedIDs = selectedPlaylistIDs
+        }
+        .onDisappear {
+            selectedPlaylistIDs = localSelectedIDs
+            saveSelectedPlaylistIDs()
         }
     }
 
