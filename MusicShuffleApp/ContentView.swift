@@ -16,13 +16,18 @@ struct ContentView: View {
     @State private var isAuthorized = false
     @State private var showError = false
     @State private var errorMessage = ""
+    @StateObject private var musicPlayerHelper = MusicPlayerHelper()
     
     var body: some View {
         NavigationView {
-            PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: playlists)
-                .onAppear {
-                    requestAuthorization()
-                }
+            VStack {
+                PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: playlists, musicPlayerHelper: musicPlayerHelper)
+                    .onAppear {
+                        requestAuthorization()
+                    }
+                NowPlayingView(song: musicPlayerHelper.currentSong)
+                
+            }
         }
         .alert("Error", isPresented: $showError) {
             Button("OK", role: .cancel) { }
@@ -65,12 +70,29 @@ struct ContentView: View {
 }
 
 class MusicPlayerHelper: ObservableObject {
+    @Published var currentSong: MPMediaItem? = nil
+    private var musicPlayer = MPMusicPlayerController.systemMusicPlayer
+    
     @Published var shuffledSongs: [MPMediaItem] = []
     @Published var nonShuffledSongs: [MPMediaItem] = []
     @Published var isLoading = false
     @Published var timer: Timer?
     @Published var progress: Double = 0
+    init() {
+        musicPlayer.beginGeneratingPlaybackNotifications()
+        self.currentSong = musicPlayer.nowPlayingItem // Set initial song
 
+        NotificationCenter.default.addObserver(
+            forName: .MPMusicPlayerControllerNowPlayingItemDidChange,
+            object: musicPlayer,
+            queue: .main
+        ) { [weak self] _ in
+            self?.currentSong = self?.musicPlayer.nowPlayingItem
+        }
+
+        musicPlayer.beginGeneratingPlaybackNotifications()
+        musicPlayer.prepareToPlay()
+    }
     func playSongs() {
         playCurrentSong()
     }
@@ -415,6 +437,7 @@ struct VerticalMetricLabelStyle: LabelStyle {
 struct PlaylistStatsView: View {
     @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
+    @ObservedObject var musicPlayerHelper: MusicPlayerHelper
 
     @AppStorage("selectedPlaylistIDs") private var selectedPlaylistIDsRaw: String = ""
     @State private var selectedPlaylistIDs: Set<UInt64> = []
@@ -639,5 +662,223 @@ struct PlaylistStatsView: View {
         helper.shuffleSongs()
         helper.shuffledSongs = helper.shuffledSongs
         helper.playSongs()
+    }
+}
+
+
+struct NowPlayingView: View {
+    let song: MPMediaItem?
+    @State private var showFullScreen = false
+    @State private var isPlaying = false
+    private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
+
+    var body: some View {
+        if let song = song {
+            VStack(spacing: 0) {
+                Button(action: {
+                    showFullScreen = true
+                }) {
+                    HStack {
+                        if let artwork = song.artwork?.image(at: CGSize(width: 44, height: 44)) {
+                            Image(uiImage: artwork)
+                                .resizable()
+                                .frame(width: 44, height: 44)
+                                .cornerRadius(4)
+                        } else {
+                            Image(systemName: "music.note")
+                                .resizable()
+                                .frame(width: 44, height: 44)
+                                .foregroundColor(.gray)
+                        }
+
+                        VStack(alignment: .leading) {
+                            Text(song.title ?? "Unknown Title")
+                                .font(.headline)
+                            Text(song.artist ?? "Unknown Artist")
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            togglePlayback()
+                        }) {
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title2)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                }
+                .background(Color(UIColor.secondarySystemBackground))
+                .onAppear {
+                    isPlaying = musicPlayer.playbackState == .playing
+                    NotificationCenter.default.addObserver(forName: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer, queue: .main) { _ in
+                        isPlaying = musicPlayer.playbackState == .playing
+                    }
+                    musicPlayer.beginGeneratingPlaybackNotifications()
+                }
+                .onDisappear {
+                    NotificationCenter.default.removeObserver(self, name: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer)
+                    musicPlayer.endGeneratingPlaybackNotifications()
+                }
+                .sheet(isPresented: $showFullScreen) {
+                    FullScreenNowPlayingView(song: song)
+                }
+            }
+        }
+    }
+
+    private func togglePlayback() {
+        if musicPlayer.playbackState == .playing {
+            musicPlayer.pause()
+            isPlaying = false
+        } else {
+            musicPlayer.play()
+            isPlaying = true
+        }
+    }
+}
+
+struct FullScreenNowPlayingView: View {
+    let song: MPMediaItem
+    @Environment(\.dismiss) private var dismiss
+    @State private var playbackProgress: Double = 0.0
+    @State private var isPlaying = false
+    @State private var currentTime: TimeInterval = 0
+    @State private var duration: TimeInterval = 0
+    private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
+    // Removed custom drag-to-dismiss states
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            if let artwork = song.artwork?.image(at: CGSize(width: 300, height: 300)) {
+                Image(uiImage: artwork)
+                    .resizable()
+                    .scaledToFit()
+                    .cornerRadius(10)
+            } else {
+                Image(systemName: "music.note")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 300, height: 300)
+                    .background(Color.gray.opacity(0.2))
+                    .cornerRadius(10)
+            }
+
+            VStack(spacing: 8) {
+                Text(song.title ?? "Unknown Title")
+                    .font(.title)
+                    .bold()
+                Text(song.artist ?? "Unknown Artist")
+                    .font(.title3)
+                    .foregroundColor(.gray)
+            }
+
+            // Slim Info Cards
+            // Card 1: Play Count and Skip Count
+            HStack(spacing: 24) {
+                Label("\(song.playCount)", systemImage: "goforward")
+                    .labelStyle(VerticalMetricLabelStyle(title: "Plays"))
+                Label("\(song.skipCount)", systemImage: "forward.fill")
+                    .labelStyle(VerticalMetricLabelStyle(title: "Skips"))
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+            .padding(.horizontal)
+
+            // Card 2: Date Added and Last Played
+            HStack(spacing: 24) {
+                if let dateAdded = song.value(forKey: "dateAdded") as? Date {
+                    Label(dateAdded.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Added"))
+                }
+                if let lastPlayed = song.lastPlayedDate {
+                    Label(lastPlayed.formatted(date: .abbreviated, time: .omitted), systemImage: "clock.arrow.circlepath")
+                        .labelStyle(VerticalMetricLabelStyle(title: "Last Played"))
+                }
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+            .padding(.horizontal)
+
+            // Card 3: Playback Progress
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: playbackProgress)
+                    .progressViewStyle(LinearProgressViewStyle(tint: .blue))
+                HStack {
+                    Text(String(format: "%d:%02d", Int(currentTime)/60, Int(currentTime)%60))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(String(format: "%d:%02d", Int(duration)/60, Int(duration)%60))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+            .padding(.horizontal)
+
+            HStack(spacing: 40) {
+                Button(action: {
+                    musicPlayer.skipToPreviousItem()
+                }) {
+                    Image(systemName: "backward.fill")
+                        .font(.largeTitle)
+                }
+
+                Button(action: {
+                    togglePlayback()
+                }) {
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 60))
+                }
+
+                Button(action: {
+                    musicPlayer.skipToNextItem()
+                }) {
+                    Image(systemName: "forward.fill")
+                        .font(.largeTitle)
+                }
+            }
+            .padding(.top, 30)
+
+            Spacer()
+        }
+        .padding()
+        // Removed custom offset and gesture; use default modal swipe-to-dismiss
+        .onAppear {
+            isPlaying = musicPlayer.playbackState == .playing
+
+            NotificationCenter.default.addObserver(forName: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer, queue: .main) { _ in
+                isPlaying = musicPlayer.playbackState == .playing
+            }
+
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+                duration = musicPlayer.nowPlayingItem?.playbackDuration ?? 0
+                if duration != 0 {
+                    currentTime = musicPlayer.currentPlaybackTime
+                    playbackProgress = currentTime / duration
+                }
+            }
+        }
+        .onDisappear {
+            NotificationCenter.default.removeObserver(self, name: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer)
+        }
+    }
+
+    private func togglePlayback() {
+        if musicPlayer.playbackState == .playing {
+            musicPlayer.pause()
+            isPlaying = false
+        } else {
+            musicPlayer.play()
+            isPlaying = true
+        }
     }
 }
