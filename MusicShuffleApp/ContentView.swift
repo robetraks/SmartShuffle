@@ -217,6 +217,11 @@ struct SongListView: View {
                             Text(song.artist ?? "Unknown Artist")
                                 .font(.caption)
                                 .foregroundColor(.gray)
+                            // PPM display
+                            let ppm = calculatePPM(song)
+                            Text(ppm.isNaN ? "PPM: NAN" : String(format: "PPM: %.2f", ppm))
+                                .font(.caption2)
+                                .foregroundColor(.blue)
                         }
                         Spacer()
                         VStack(alignment: .trailing, spacing: 2) {
@@ -253,6 +258,13 @@ struct SongListView: View {
             .cornerRadius(8)
             .font(.headline)
         }
+    }
+
+    private func calculatePPM(_ song: MPMediaItem) -> Double {
+        guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
+        let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+        if months == 0 { return .nan }
+        return Double(song.playCount - song.skipCount) / Double(months)
     }
 }
 
@@ -338,19 +350,131 @@ struct PlaylistView: View {
 }
 
 struct AllSongsView: View {
+    enum SortMode: String, CaseIterable, Identifiable {
+        case ppm = "PPM Order"
+        case smart = "Smart Shuffle"
+        var id: String { rawValue }
+    }
+
     @State private var allSongs: [MPMediaItem] = []
     @ObservedObject private var musicPlayerHelper = MusicPlayerHelper()
+    @State private var sortAscending = true
+    @State private var minMonthsText = "0"
+    @State private var sortMode: SortMode = .ppm
+    @State private var minMonths: Int = 0
+    @State private var sortedSongs: [MPMediaItem] = []
+
+    // Selection mode state
+    @State private var isSelectMode = false
+    @State private var selectedIDs = Set<UInt64>()
 
     var body: some View {
-        SongListView(songs: allSongs, musicPlayerHelper: musicPlayerHelper, playlistInfoCard: playlistInfoCard)
-            .onAppear {
-                fetchAllSongs()
+        VStack {
+            // Toolbar for selection mode
+            HStack {
+                Spacer()
+                Button(isSelectMode ? "Cancel" : "Select") {
+                    isSelectMode.toggle()
+                    if !isSelectMode { selectedIDs.removeAll() }
+                }
+                .padding()
             }
-            .onDisappear {
-                musicPlayerHelper.timer?.invalidate()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Min Months Since Added:")
+                    TextField("Months", text: $minMonthsText)
+                        .keyboardType(.numberPad)
+                        .submitLabel(.done)
+                        .frame(width: 50)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .disabled(sortMode == .smart)
+                        .opacity(sortMode == .smart ? 0.5 : 1.0)
+                        .onSubmit {
+                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            minMonths = Int(minMonthsText) ?? 0
+                        }
+                    Spacer()
+                    Picker("Sort", selection: $sortAscending) {
+                        Text("↑").tag(true)
+                        Text("↓").tag(false)
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    .frame(width: 100)
+                    .disabled(sortMode == .smart)
+                    .opacity(sortMode == .smart ? 0.5 : 1.0)
+                }
+                Picker("Sort Mode", selection: $sortMode) {
+                    ForEach(SortMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(SegmentedPickerStyle())
             }
+            .padding(.horizontal)
+            .background(Color(UIColor.secondarySystemBackground))
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                        minMonths = Int(minMonthsText) ?? 0
+                    }
+                }
+            }
+
+            // Song List with selection mode
+            List(filteredAndSortedSongs, id: \.persistentID) { song in
+                HStack {
+                    if isSelectMode {
+                        Button(action: {
+                            let id = song.persistentID
+                            if selectedIDs.contains(id) {
+                                selectedIDs.remove(id)
+                            } else {
+                                selectedIDs.insert(id)
+                            }
+                        }) {
+                            Image(systemName: selectedIDs.contains(song.persistentID) ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    SongRow(song: song, calculatePPM: calculatePPM(_:))
+                }
+            }
+
+            // Save selection button
+            if isSelectMode {
+                Button("Save Selection to Songs2BeRemoved") {
+                    createOrRewritePlaylist()
+                    isSelectMode = false
+                    selectedIDs.removeAll()
+                }
+                .padding()
+            }
+
+            Button("Play in Apple Music") {
+                musicPlayerHelper.isLoading = true
+                musicPlayerHelper.playSongs()
+                musicPlayerHelper.isLoading = false
+                musicPlayerHelper.openAppleMusic()
+            }
+            .padding(.vertical, 20)
+            .padding(.horizontal, 40)
+            .background(Color.red)
+            .foregroundColor(.white)
+            .cornerRadius(8)
+            .font(.headline)
+        }
+        .onAppear {
+            fetchAllSongs()
+        }
+        .onDisappear {
+            musicPlayerHelper.timer?.invalidate()
+        }
+        .onChange(of: sortMode) { _, _ in updateSortedSongs() }
+        .onChange(of: sortAscending) { _, _ in updateSortedSongs() }
     }
-    
+
     private func fetchAllSongs() {
         let query = MPMediaQuery.songs()
         if let items = query.items {
@@ -359,59 +483,114 @@ struct AllSongsView: View {
         musicPlayerHelper.nonShuffledSongs = allSongs
         musicPlayerHelper.shuffleSongs()
         allSongs = musicPlayerHelper.shuffledSongs
+        updateSortedSongs()
     }
 
-    private var playlistInfoCard: AnyView {
-        let totalDuration = allSongs.reduce(0) { $0 + $1.playbackDuration }
-        let playedDuration = allSongs.reduce(0.0) { result, item in
-            let count = item.playCount
-            return result + (Double(count) * item.playbackDuration)
+    private func updateSortedSongs() {
+        switch sortMode {
+        case .ppm:
+            sortedSongs = allSongs.sorted { a, b in
+                let v0 = calculatePPM(a)
+                let v1 = calculatePPM(b)
+                // Place NaN values at the end
+                if v0.isNaN && v1.isNaN { return false }
+                if v0.isNaN { return false }
+                if v1.isNaN { return true }
+                return sortAscending ? v0 < v1 : v0 > v1
+            }
+        case .smart:
+            sortedSongs = allSongs
         }
-        let affinityScore = allSongs.isEmpty ? 0 : playedDuration / Double(allSongs.count)
-        let mostPlayedSong = allSongs.max(by: { $0.playCount < $1.playCount })
+    }
 
-        return AnyView(
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 24) {
-                    Label("\(allSongs.count)", systemImage: "music.note.list")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Songs"))
-                    Label(formatTime(totalDuration), systemImage: "clock")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Total Duration"))
-                    Label(formatTime(playedDuration), systemImage: "play.circle")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Played"))
-                    Label(formatTime(affinityScore), systemImage: "star.fill")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Affinity Score"))
-                }
+    private var filteredAndSortedSongs: [MPMediaItem] {
+        sortedSongs.filter {
+            guard let addedDate = $0.value(forKey: "dateAdded") as? Date else { return false }
+            let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+            return months > minMonths
+        }
+    }
 
-                if let song = mostPlayedSong {
-                    Divider()
-                    Text("Most Played Song")
+    private func calculatePPM(_ song: MPMediaItem) -> Double {
+        guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
+        let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+        if months == 0 { return .nan }
+        return Double(song.playCount - song.skipCount) / Double(months)
+    }
+
+    // Playlist creation logic
+    private func createOrRewritePlaylist() {
+        let title = "Songs2BeRemoved"
+        let metadata = MPMediaPlaylistCreationMetadata(name: title)
+        // Look for existing playlist by name
+        let query = MPMediaQuery.playlists()
+        if let playlists = query.collections as? [MPMediaPlaylist],
+           let existing = playlists.first(where: { $0.name == title }) {
+            // For existing playlists, we'll just add the selected songs
+            // Note: MPMediaPlaylist doesn't have a direct remove method in the public API
+            addSelected(to: existing)
+        } else {
+            // Create new playlist
+            MPMediaLibrary.default().getPlaylist(with: UUID(), creationMetadata: metadata) { playlist, error in
+                guard let playlist = playlist else { return }
+                addSelected(to: playlist)
+            }
+        }
+    }
+
+    private func addSelected(to playlist: MPMediaPlaylist) {
+        let songsToAdd = allSongs.filter { selectedIDs.contains($0.persistentID) }
+        if !songsToAdd.isEmpty {
+            playlist.add(songsToAdd) { error in
+                // Optionally handle error or notify user here
+            }
+        }
+    }
+}
+
+// SongRow view for displaying a song (factored out from SongListView)
+struct SongRow: View {
+    let song: MPMediaItem
+    let calculatePPM: (MPMediaItem) -> Double
+
+    var body: some View {
+        HStack {
+            if let artwork = song.artwork?.image(at: CGSize(width: 40, height: 40)) {
+                Image(uiImage: artwork)
+                    .resizable()
+                    .frame(width: 40, height: 40)
+                    .cornerRadius(4)
+            } else {
+                Image(systemName: "music.note")
+                    .frame(width: 40, height: 40)
+                    .background(Color.gray.opacity(0.2))
+                    .cornerRadius(4)
+            }
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(song.title ?? "Unknown Song")
+                        .font(.body)
+                    Text(song.artist ?? "Unknown Artist")
                         .font(.caption)
                         .foregroundColor(.gray)
-                    Text("\(song.title ?? "Unknown") (\(song.playCount) plays)")
-                        .font(.body)
+                    // PPM display
+                    let ppm = calculatePPM(song)
+                    Text(ppm.isNaN ? "PPM: NAN" : String(format: "PPM: %.2f", ppm))
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let lastPlayed = song.lastPlayedDate {
+                        Text(lastPlayed.formatted(date: .abbreviated, time: .omitted))
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                    }
+                    Text("\(song.playCount) plays")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
                 }
             }
-            .padding()
-            .background(Color.blue.opacity(0.2))
-            .cornerRadius(10)
-            .padding(.horizontal)
-            .frame(maxWidth: .infinity)
-        )
-    }
-
-    private func formatTime(_ time: TimeInterval) -> String {
-        if time >= 86400 {
-            let days = time / 86400
-            return String(format: "%.1f days", days)
-        }
-        let hours = Int(time) / 3600
-        let minutes = (Int(time) % 3600) / 60
-
-        if hours > 0 {
-            return String(format: "%02dh %02dm", hours, minutes)
-        } else {
-            return String(format: "%02dm", minutes)
         }
     }
 }
