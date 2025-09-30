@@ -1,5 +1,6 @@
 import SwiftUI
 import MediaPlayer
+import AVFoundation
 
 @main
 struct MusicShuffleApp: App {
@@ -8,6 +9,12 @@ struct MusicShuffleApp: App {
             ContentView()
         }
     }
+}
+func calculatePPM(_ song: MPMediaItem) -> Double {
+    guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
+    let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+    if months == 0 { return .nan }
+    return Double(song.playCount - song.skipCount) / Double(months)
 }
 
 struct ContentView: View {
@@ -260,7 +267,7 @@ struct SongListView: View {
         }
     }
 
-    private func calculatePPM(_ song: MPMediaItem) -> Double {
+    private func calculatePPM1(_ song: MPMediaItem) -> Double {
         guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
         let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
         if months == 0 { return .nan }
@@ -536,7 +543,7 @@ struct AllSongsView: View {
         }
     }
 
-    private func calculatePPM(_ song: MPMediaItem) -> Double {
+    private func calculatePPM1(_ song: MPMediaItem) -> Double {
         guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
         let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
         if months == 0 { return .nan }
@@ -996,6 +1003,12 @@ struct FullScreenNowPlayingView: View {
     private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
     // Removed custom drag-to-dismiss states
 
+    // Extra metadata
+    @State private var metaComposer: String? = nil
+    @State private var metaLyricist: String? = nil
+    @State private var metaSongwriter: String? = nil
+    @State private var releaseYear: String? = nil
+
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -1021,31 +1034,82 @@ struct FullScreenNowPlayingView: View {
                 Text(song.artist ?? "Unknown Artist")
                     .font(.title3)
                     .foregroundColor(.gray)
+                // Card 1: Song Credits (one per line; composer, lyricist, songwriter)
+                VStack(alignment: .leading, spacing: 6) {
+                    if let composer = metaComposer, !composer.isEmpty {
+                        LabelInline(title: "Composer:", value: composer, systemImage: "music.quarternote.3")
+                    }
+                    if let lyricist = metaLyricist, !lyricist.isEmpty {
+                        LabelInline(title: "Lyricist:", value: lyricist, systemImage: "text.quote")
+                    }
+                    if let songwriter = metaSongwriter, !songwriter.isEmpty {
+                        LabelInline(title: "Songwriter:", value: songwriter, systemImage: "pencil")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+                .padding(.horizontal)
             }
 
-            // Slim Info Cards
-            // Card 1: Play Count and Skip Count
-            HStack(spacing: 24) {
-                Label("\(song.playCount)", systemImage: "goforward")
-                    .labelStyle(VerticalMetricLabelStyle(title: "Plays"))
-                Label("\(song.skipCount)", systemImage: "forward.fill")
-                    .labelStyle(VerticalMetricLabelStyle(title: "Skips"))
+            // Card 2: Plays and Skips (more compact)
+            HStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "goforward")
+                    Text("Plays: \(song.playCount)")
+                }
+                .font(.subheadline)
+                .foregroundColor(.primary)
+                HStack(spacing: 6) {
+                    Image(systemName: "forward.fill")
+                    Text("Skips: \(song.skipCount)")
+                }
+                .font(.subheadline)
+                .foregroundColor(.primary)
+                HStack(spacing: 6) {
+                    Image(systemName: "chart.bar")
+                    let ppm = calculatePPM(song)
+                    Text(ppm.isNaN ? "PPM: NAN" : String(format: "PPM: %.2f", ppm))
+                }
+                .font(.subheadline)
+                .foregroundColor(.primary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
             .padding(.horizontal)
 
-            // Card 2: Date Added and Last Played
-            HStack(spacing: 24) {
-                if let dateAdded = song.value(forKey: "dateAdded") as? Date {
-                    Label(dateAdded.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Added"))
+            // Card 3: Dates (icons + dates only)
+            HStack(spacing: 36) {
+                HStack(spacing: 6) {
+                    if let rd = song.value(forKey: "releaseDate") as? Date {
+                        Image(systemName: "calendar")
+                        Text(rd.formatted(date: .abbreviated, time: .omitted))
+                    } else if let year = releaseYear, !year.isEmpty {
+                        Image(systemName: "calendar")
+                        Text(year)
+                    }
                 }
-                if let lastPlayed = song.lastPlayedDate {
-                    Label(lastPlayed.formatted(date: .abbreviated, time: .omitted), systemImage: "clock.arrow.circlepath")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Last Played"))
+                .font(.subheadline)
+                .foregroundColor(.primary)
+                HStack(spacing: 6) {
+                    if let dateAdded = song.value(forKey: "dateAdded") as? Date {
+                        Image(systemName: "tray.and.arrow.down")
+                        Text(dateAdded.formatted(date: .abbreviated, time: .omitted))
+                    }
                 }
+                .font(.subheadline)
+                .foregroundColor(.primary)
+                HStack(spacing: 6) {
+                    if let lastPlayed = song.lastPlayedDate {
+                        Image(systemName: "clock.arrow.circlepath")
+                        Text(lastPlayed.formatted(date: .abbreviated, time: .omitted))
+                    }
+                }
+                .font(.subheadline)
+                .foregroundColor(.primary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
             .padding(.horizontal)
@@ -1099,6 +1163,45 @@ struct FullScreenNowPlayingView: View {
         .onAppear {
             isPlaying = musicPlayer.playbackState == .playing
 
+            // Seed metadata from MPMediaItem
+            metaComposer = (song.composer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let rd = song.value(forKey: "releaseDate") as? Date {
+                let y = Calendar.current.component(.year, from: rd)
+                releaseYear = String(y)
+            } else if let yearNum = song.value(forKey: "year") as? NSNumber {
+                releaseYear = yearNum.stringValue
+            }
+
+            // Try to enrich with AVAsset metadata using async loading to avoid deprecation
+            if let url = song.assetURL {
+                Task {
+                    let asset = AVURLAsset(url: url)
+                    let meta = (try? await asset.load(.metadata)) ?? []
+                    func firstString(for keys: [String]) async -> String? {
+                        let keysLower = Set(keys.map { $0.lowercased() })
+                        for item in meta {
+                            let common = item.commonKey?.rawValue.lowercased()
+                            let ident = item.identifier?.rawValue.lowercased()
+                            if (common != nil && keysLower.contains(common!)) || keysLower.contains(where: { ident?.contains($0) == true }) {
+                                if let s = try? await item.load(.stringValue), !s.isEmpty {
+                                    return s
+                                }
+                            }
+                        }
+                        return nil
+                    }
+                    if (metaComposer == nil || metaComposer?.isEmpty == true) {
+                        if let comp = await firstString(for: ["composer"]) { await MainActor.run { metaComposer = comp } }
+                    }
+                    if let lyr = await firstString(for: ["lyricist"]) { await MainActor.run { metaLyricist = lyr } }
+                    if let auth = await firstString(for: ["songwriter", "writer", "author"]) { await MainActor.run { metaSongwriter = auth } }
+                    if releaseYear == nil, let dateStr = await firstString(for: ["creationdate"]) {
+                        let yearPrefix = dateStr.prefix(4)
+                        if Int(yearPrefix) != nil { await MainActor.run { releaseYear = String(yearPrefix) } }
+                    }
+                }
+            }
+
             NotificationCenter.default.addObserver(forName: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer, queue: .main) { _ in
                 isPlaying = musicPlayer.playbackState == .playing
             }
@@ -1124,5 +1227,23 @@ struct FullScreenNowPlayingView: View {
             musicPlayer.play()
             isPlaying = true
         }
+    }
+}
+
+struct LabelInline: View {
+    let title: String
+    let value: String
+    let systemImage: String
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text(value)
+                .lineLimit(1)
+        }
+        .font(.caption)
+        .foregroundColor(.secondary)
     }
 }
