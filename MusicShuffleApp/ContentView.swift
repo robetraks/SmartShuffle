@@ -300,20 +300,46 @@ struct PlaylistView: View {
             let count = item.playCount
             return result + (Double(count) * item.playbackDuration)
         }
-        let affinityScore = playlistSongs.isEmpty ? 0 : playedDuration / Double(playlistSongs.count)
         let mostPlayedSong = playlistSongs.max(by: { $0.playCount < $1.playCount })
 
+        // Median PPM for songs in this playlist
+        let ppmValues = playlistSongs.compactMap { song -> Double? in
+            guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return nil }
+            let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+            if months <= 0 { return nil }
+            return Double(song.playCount - song.skipCount) / Double(months)
+        }.sorted()
+        let medianPPM: Double = {
+            guard !ppmValues.isEmpty else { return .nan }
+            let mid = ppmValues.count / 2
+            if ppmValues.count % 2 == 0 {
+                return (ppmValues[mid - 1] + ppmValues[mid]) / 2.0
+            } else {
+                return ppmValues[mid]
+            }
+        }()
+
         return AnyView(
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 24) {
+            VStack(alignment: .leading, spacing: 12) {
+                // Compact metrics row: songs, median PPM (icon+value), total duration, played duration
+                HStack(spacing: 16) {
                     Label("\(playlistSongs.count)", systemImage: "music.note.list")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Songs"))
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        Image(systemName: "chart.bar")
+                            .foregroundColor(medianPPM.isNaN ? .secondary : .blue)
+                        Text(medianPPM.isNaN ? "--" : String(format: "%.2f", medianPPM))
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
                     Label(formatTime(totalDuration), systemImage: "clock")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Total Duration"))
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
                     Label(formatTime(playedDuration), systemImage: "play.circle")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Played"))
-                    Label(formatTime(affinityScore), systemImage: "star.fill")
-                        .labelStyle(VerticalMetricLabelStyle(title: "Affinity Score"))
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Spacer()
                 }
 
                 if let song = mostPlayedSong {
@@ -326,8 +352,7 @@ struct PlaylistView: View {
                 }
             }
             .padding()
-            .background(Color.blue.opacity(0.2))
-            .cornerRadius(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.2)))
             .padding(.horizontal)
             .frame(maxWidth: .infinity)
         )
@@ -636,7 +661,7 @@ struct PlaylistStatsView: View {
     enum SortOption: String, CaseIterable, Identifiable {
         case name = "Name"
         case songs = "Songs"
-        case affinity = "Affinity"
+        case medianPPM = "Median PPM"
         case total = "Total"
         case played = "Played"
         var id: String { rawValue }
@@ -651,7 +676,7 @@ struct PlaylistStatsView: View {
         let songCount: Int
         let totalDuration: TimeInterval
         let playedDuration: TimeInterval
-        let affinityScore: TimeInterval
+        let medianPPM: Double
     }
 
     var sortedStats: [Stats] {
@@ -662,8 +687,23 @@ struct PlaylistStatsView: View {
             let songs = playlist.items
             let total = songs.reduce(0) { $0 + $1.playbackDuration }
             let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
-            let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
-            return Stats(playlist: playlist, songCount: songs.count, totalDuration: total, playedDuration: played, affinityScore: affinity)
+            // Compute Median PPM across songs in playlist
+            let ppmValues = songs.compactMap { song -> Double? in
+                guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return nil }
+                let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+                if months <= 0 { return nil }
+                return Double(song.playCount - song.skipCount) / Double(months)
+            }.sorted()
+            let median: Double = {
+                guard !ppmValues.isEmpty else { return .nan }
+                let mid = ppmValues.count / 2
+                if ppmValues.count % 2 == 0 {
+                    return (ppmValues[mid - 1] + ppmValues[mid]) / 2.0
+                } else {
+                    return ppmValues[mid]
+                }
+            }()
+            return Stats(playlist: playlist, songCount: songs.count, totalDuration: total, playedDuration: played, medianPPM: median)
         }
 
         switch sortOption {
@@ -671,8 +711,8 @@ struct PlaylistStatsView: View {
             return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         case .songs:
             return base.sorted { $0.songCount > $1.songCount }
-        case .affinity:
-            return base.sorted { $0.affinityScore > $1.affinityScore }
+        case .medianPPM:
+            return base.sorted { ($0.medianPPM.isNaN ? -Double.infinity : $0.medianPPM) > ($1.medianPPM.isNaN ? -Double.infinity : $1.medianPPM) }
         case .total:
             return base.sorted { $0.totalDuration > $1.totalDuration }
         case .played:
@@ -714,21 +754,25 @@ struct PlaylistStatsView: View {
                                 .padding(.leading)
                             }
                             NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)) {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text(stat.name)
-                                            .font(.headline)
-                                            .foregroundColor(.primary)
-                                        HStack(spacing: 16) {
-                                            Label("\(stat.songCount)", systemImage: "music.note.list")
-                                            Label(formatTime(stat.affinityScore), systemImage: "star.fill")
-                                            Label(formatTime(stat.totalDuration), systemImage: "clock")
-                                            Label(formatTime(stat.playedDuration), systemImage: "play.circle")
-                                        }
-                                        .font(.subheadline)
-                                        .foregroundColor(.secondary)
-                                    }
+                                HStack(spacing: 12) {
+                                    Text(stat.name)
+                                        .font(.headline)
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
                                     Spacer()
+                                    // Compact metrics on a single line: song count + median PPM value (no label text)
+                                    HStack(spacing: 12) {
+                                        Label("\(stat.songCount)", systemImage: "music.note.list")
+                                            .font(.subheadline)
+                                            .foregroundColor(.secondary)
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "chart.bar")
+                                                .foregroundColor(stat.medianPPM.isNaN ? .secondary : .blue)
+                                            Text(stat.medianPPM.isNaN ? "--" : String(format: "%.2f", stat.medianPPM))
+                                                .font(.subheadline)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
                                     Image(systemName: "chevron.right")
                                         .foregroundColor(.gray)
                                 }
@@ -784,10 +828,31 @@ struct PlaylistStatsView: View {
                         let songs = MPMediaQuery.songs().items ?? []
                         let total = songs.reduce(0) { $0 + $1.playbackDuration }
                         let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
-                        let affinity = songs.isEmpty ? 0 : played / Double(songs.count)
+                        // Median PPM for all songs
+                        let allPPM = songs.compactMap { song -> Double? in
+                            guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return nil }
+                            let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+                            if months <= 0 { return nil }
+                            return Double(song.playCount - song.skipCount) / Double(months)
+                        }.sorted()
+                        let medianAllPPM: Double = {
+                            guard !allPPM.isEmpty else { return .nan }
+                            let mid = allPPM.count / 2
+                            if allPPM.count % 2 == 0 {
+                                return (allPPM[mid - 1] + allPPM[mid]) / 2.0
+                            } else {
+                                return allPPM[mid]
+                            }
+                        }()
                         HStack(spacing: 16) {
                             Label("\(songs.count)", systemImage: "music.note.list")
-                            Label(formatTime(affinity), systemImage: "star.fill")
+                            HStack(spacing: 4) {
+                                Image(systemName: "chart.bar")
+                                    .foregroundColor(medianAllPPM.isNaN ? .secondary : .blue)
+                                Text(medianAllPPM.isNaN ? "--" : String(format: "%.2f", medianAllPPM))
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
                             Label(formatTime(total), systemImage: "clock")
                             Label(formatTime(played), systemImage: "play.circle")
                         }
