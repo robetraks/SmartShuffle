@@ -4,9 +4,15 @@ import AVFoundation
 
 @main
 struct MusicShuffleApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup {
             ContentView()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                _ = PlayCountSnapshotStore.shared.takeSnapshot()
+            }
         }
     }
 }
@@ -26,14 +32,30 @@ struct ContentView: View {
     @StateObject private var musicPlayerHelper = MusicPlayerHelper()
     
     var body: some View {
-        NavigationView {
-            VStack {
-                PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: playlists, musicPlayerHelper: musicPlayerHelper)
-                    .onAppear {
-                        requestAuthorization()
-                    }
-                NowPlayingView(song: musicPlayerHelper.currentSong)
-                
+        TabView {
+            // Tab 1: Playlists (existing functionality)
+            NavigationView {
+                VStack {
+                    PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: playlists, musicPlayerHelper: musicPlayerHelper)
+                        .onAppear {
+                            requestAuthorization()
+                        }
+                    NowPlayingView(song: musicPlayerHelper.currentSong)
+                }
+            }
+            .tabItem {
+                Label("Playlists", systemImage: "music.note.list")
+            }
+
+            // Tab 2: Stats
+            NavigationView {
+                VStack {
+                    StatsView()
+                    NowPlayingView(song: musicPlayerHelper.currentSong)
+                }
+            }
+            .tabItem {
+                Label("Stats", systemImage: "chart.bar")
             }
         }
         .alert("Error", isPresented: $showError) {
@@ -76,6 +98,131 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Play History Store
+
+struct PlayEvent: Codable, Hashable {
+    let songPersistentID: UInt64
+    let timestamp: Date
+}
+
+final class PlayHistoryStore: ObservableObject {
+    static let shared = PlayHistoryStore()
+    private let storageKey = "PlayHistoryEvents_v1"
+    @Published private(set) var events: [PlayEvent] = []
+
+    private init() {
+        load()
+    }
+
+    func recordPlay(_ item: MPMediaItem?) {
+        guard let item = item else { return }
+        let ev = PlayEvent(songPersistentID: item.persistentID, timestamp: Date())
+        events.append(ev)
+        save()
+    }
+
+    func reset(from date: Date) {
+        // No-op: we keep all events; filtering is done at query time relative to a "custom start" date
+        // Keeping events lets us show stats for any window later.
+    }
+
+    private func save() {
+        do {
+            let data = try JSONEncoder().encode(events)
+            UserDefaults.standard.set(data, forKey: storageKey)
+        } catch {
+            // Ignore save failures silently for now
+        }
+    }
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
+        if let loaded = try? JSONDecoder().decode([PlayEvent].self, from: data) {
+            events = loaded
+        }
+    }
+}
+
+// MARK: - System PlayCount Snapshot Store (system-history only)
+struct PlayCountSnapshot: Codable {
+    let date: Date
+    let counts: [UInt64: Int]  // persistentID -> playCount
+}
+
+final class PlayCountSnapshotStore: ObservableObject {
+    static let shared = PlayCountSnapshotStore()
+    private let snapshotsKey = "PlayCountSnapshots_v1"
+    private let customBaselineKey = "CustomBaselineSnapshot_v1"
+    @Published private(set) var snapshots: [PlayCountSnapshot] = [] // sorted by date asc
+
+    private init() { load() }
+
+    // Take a new snapshot from system media library
+    @discardableResult
+    func takeSnapshot(date: Date = Date()) -> PlayCountSnapshot? {
+        let songs = MPMediaQuery.songs().items ?? []
+        guard !songs.isEmpty else { return nil }
+        var map: [UInt64: Int] = [:]
+        map.reserveCapacity(songs.count)
+        for it in songs {
+            map[it.persistentID] = it.playCount
+        }
+        let snap = PlayCountSnapshot(date: date, counts: map)
+        snapshots.append(snap)
+        snapshots.sort { $0.date < $1.date }
+        trim(maxCount: 60) // keep up to ~2 months of daily snapshots
+        save()
+        return snap
+    }
+
+    // Ensure we have a recent snapshot (e.g., at least one per day)
+    func ensureRecentSnapshot(maxAge hours: Double = 24) {
+        if let last = snapshots.last, Date().timeIntervalSince(last.date) < hours * 3600 {
+            return
+        }
+        _ = takeSnapshot()
+    }
+
+    func snapshot(beforeOrOn date: Date) -> PlayCountSnapshot? {
+        return snapshots.last(where: { $0.date <= date })
+    }
+
+    // Custom baseline (used for resettable custom stats)
+    func setCustomBaselineNow() {
+        let snap = takeSnapshot() ?? PlayCountSnapshot(date: Date(), counts: [:])
+        saveCustomBaseline(snap)
+    }
+
+    func getCustomBaseline() -> PlayCountSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: customBaselineKey) else { return nil }
+        return try? JSONDecoder().decode(PlayCountSnapshot.self, from: data)
+    }
+
+    private func saveCustomBaseline(_ snap: PlayCountSnapshot) {
+        if let data = try? JSONEncoder().encode(snap) {
+            UserDefaults.standard.set(data, forKey: customBaselineKey)
+        }
+    }
+
+    private func trim(maxCount: Int) {
+        if snapshots.count > maxCount {
+            snapshots = Array(snapshots.suffix(maxCount))
+        }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(snapshots) {
+            UserDefaults.standard.set(data, forKey: snapshotsKey)
+        }
+    }
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: snapshotsKey),
+              let decoded = try? JSONDecoder().decode([PlayCountSnapshot].self, from: data) else { return }
+        snapshots = decoded.sorted { $0.date < $1.date }
+    }
+}
+
 class MusicPlayerHelper: ObservableObject {
     @Published var currentSong: MPMediaItem? = nil
     private var musicPlayer = MPMusicPlayerController.systemMusicPlayer
@@ -95,6 +242,9 @@ class MusicPlayerHelper: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             self?.currentSong = self?.musicPlayer.nowPlayingItem
+            if let newItem = self?.musicPlayer.nowPlayingItem {
+                PlayHistoryStore.shared.recordPlay(newItem)
+            }
         }
 
         musicPlayer.beginGeneratingPlaybackNotifications()
@@ -1245,5 +1395,324 @@ struct LabelInline: View {
         }
         .font(.caption)
         .foregroundColor(.secondary)
+    }
+}
+
+
+// MARK: - Stats View
+
+struct StatsSnapshot {
+    let uniqueSongCount: Int
+    let totalPlayDuration: TimeInterval
+    let mostPlayedSong: MPMediaItem?
+    let mostPlayedSongCount: Int?
+    let mostPlayedPlaylist: MPMediaPlaylist?
+}
+
+struct StatsView: View {
+    @ObservedObject private var snapshotStore = PlayCountSnapshotStore.shared
+    @State private var allPlaylists: [MPMediaPlaylist] = []
+    @AppStorage("customStatsStartDate") private var customStartDate: Date = Date()
+    @AppStorage("statsSelectedPlaylistIDs") private var statsSelectedPlaylistIDsRaw: String = ""
+
+    @State private var isSelectMode = false
+    @State private var localSelectedIDs: Set<UInt64> = []
+
+    private func loadSelectedPlaylistIDs() {
+        let ids = statsSelectedPlaylistIDsRaw.split(separator: ",").compactMap { UInt64($0) }
+        localSelectedIDs = Set(ids)
+    }
+
+    private func saveSelectedPlaylistIDs() {
+        statsSelectedPlaylistIDsRaw = localSelectedIDs.map { String($0) }.joined(separator: ",")
+    }
+
+    private var selectedPlaylistIDs: Set<UInt64> {
+        // Use local in-view edits immediately; fall back to persisted selection
+        if !localSelectedIDs.isEmpty || isSelectMode { return localSelectedIDs }
+        return Set(statsSelectedPlaylistIDsRaw.split(separator: ",").compactMap { UInt64($0) })
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Playing Activity")
+                    .font(.largeTitle).bold()
+                    .padding(.horizontal)
+                if let last = snapshotStore.snapshots.last?.date {
+                    Text("Last snapshot: \(last.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal)
+                } else {
+                    Text("Last snapshot: —")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal)
+                }
+
+                // Selection toolbar (mirrors Playlists tab)
+                HStack {
+                    Spacer()
+                    Button(isSelectMode ? "Done" : "Select Stats Playlists") {
+                        if isSelectMode {
+                            // Persist on exit of selection mode
+                            saveSelectedPlaylistIDs()
+                        } else {
+                            // Ensure local copy is synced before editing
+                            loadSelectedPlaylistIDs()
+                        }
+                        isSelectMode.toggle()
+                    }
+                    .padding(.trailing)
+                }
+
+                // Inline selection list when in selection mode
+                if isSelectMode {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Choose which playlists Stats should consider")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(allPlaylists, id: \.persistentID) { pl in
+                                    Button {
+                                        let id = pl.persistentID
+                                        if localSelectedIDs.contains(id) {
+                                            localSelectedIDs.remove(id)
+                                        } else {
+                                            localSelectedIDs.insert(id)
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Image(systemName: localSelectedIDs.contains(pl.persistentID) ? "checkmark.circle.fill" : "circle")
+                                                .foregroundColor(localSelectedIDs.contains(pl.persistentID) ? .blue : .gray)
+                                            Text(pl.name ?? "Unknown")
+                                                .lineLimit(1)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal)
+                                        .padding(.vertical, 6)
+                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.12)))
+                                        .padding(.horizontal)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 220)
+                        .padding(.bottom, 4)
+                    }
+                }
+
+                // Card 1: Last week
+                statsCard(title: "Last 7 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -7, to: Date())!))
+
+                // Card 2: Last month
+                statsCard(title: "Last 30 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -30, to: Date())!))
+
+                // Card 3: Custom (resettable)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Custom (since \(customStartDate.formatted(date: .abbreviated, time: .omitted)))")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            customStartDate = Date()
+                            snapshotStore.setCustomBaselineNow()
+                        } label: {
+                            Label("Reset", systemImage: "arrow.counterclockwise")
+                                .labelStyle(.titleAndIcon)
+                        }
+                    }
+                    .padding(.horizontal)
+                    cardContent(for: computeSnapshot(since: customStartDate))
+                }
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+                .padding(.horizontal)
+
+                Spacer(minLength: 24)
+            }
+        }
+        .onAppear {
+            loadPlaylists()
+            loadSelectedPlaylistIDs()
+            snapshotStore.ensureRecentSnapshot() // make sure we have at least one snapshot
+        }
+    }
+
+    private func loadPlaylists() {
+        let query = MPMediaQuery.playlists()
+        if let items = query.collections as? [MPMediaPlaylist] {
+            allPlaylists = items
+        }
+    }
+
+    // Build a StatsSnapshot for events since a given date using system play count deltas from snapshots
+    private func computeSnapshot(since start: Date) -> StatsSnapshot {
+        // Determine baseline snapshot:
+        // - For Custom window, prefer custom baseline if present and newer than start.
+        // - Otherwise, use the latest snapshot taken on/before `start`.
+        let baseline: PlayCountSnapshot? = {
+            if let custom = snapshotStore.getCustomBaseline(), custom.date >= start {
+                return custom
+            }
+            return snapshotStore.snapshot(beforeOrOn: start)
+        }()
+
+        // Current counts from system (no app-logged events)
+        let currentSongs = MPMediaQuery.songs().items ?? []
+        var currentCounts: [UInt64: Int] = [:]
+        currentCounts.reserveCapacity(currentSongs.count)
+        for it in currentSongs {
+            currentCounts[it.persistentID] = it.playCount
+        }
+
+        let baselineCounts = baseline?.counts ?? [:]
+
+        // Compute deltas (plays within the window)
+        var deltaCounts: [UInt64: Int] = [:]
+        for (id, now) in currentCounts {
+            let then = baselineCounts[id] ?? 0
+            let delta = max(0, now - then)
+            if delta > 0 { deltaCounts[id] = delta }
+        }
+
+        let ids = Set(deltaCounts.keys)
+        let itemsByID = lookupMediaItems(for: ids)
+
+        // Duration = sum(delta * track duration)
+        var totalDuration: TimeInterval = 0
+        var mostPlayed: (id: UInt64, count: Int, duration: TimeInterval)? = nil
+        for (id, count) in deltaCounts {
+            guard let item = itemsByID[id] else { continue }
+            let contribution = Double(count) * item.playbackDuration
+            totalDuration += contribution
+            let current = (id: id, count: count, duration: contribution)
+            if let best = mostPlayed {
+                if current.count > best.count || (current.count == best.count && current.duration > best.duration) {
+                    mostPlayed = current
+                }
+            } else {
+                mostPlayed = current
+            }
+        }
+
+        let mostPlayedSong = mostPlayed.flatMap { itemsByID[$0.id] }
+
+        // Most played playlist = among the user-selected playlists only.
+        // If none are selected or there is no overlap, result is nil.
+        let uniqueIDs = ids
+        var best: (playlist: MPMediaPlaylist, count: Int)? = nil
+        for pl in allPlaylists {
+            // Consider only playlists the user selected in the Playlists tab
+            guard selectedPlaylistIDs.contains(pl.persistentID) else { continue }
+            let idsInPlaylist = Set(pl.items.map { $0.persistentID })
+            let overlapCount = idsInPlaylist.intersection(uniqueIDs).count
+            if overlapCount > 0 {
+                if let currentBest = best {
+                    if overlapCount > currentBest.count {
+                        best = (pl, overlapCount)
+                    }
+                } else {
+                    best = (pl, overlapCount)
+                }
+            }
+        }
+        let mostPlaylist = best?.playlist
+
+        return StatsSnapshot(
+            uniqueSongCount: uniqueIDs.count,
+            totalPlayDuration: totalDuration,
+            mostPlayedSong: mostPlayedSong,
+            mostPlayedSongCount: mostPlayed?.count,
+            mostPlayedPlaylist: mostPlaylist
+        )
+    }
+
+    private func lookupMediaItems(for ids: Set<UInt64>) -> [UInt64: MPMediaItem] {
+        guard !ids.isEmpty else { return [:] }
+        var result: [UInt64: MPMediaItem] = [:]
+        // Query all songs once and map — simple and effective for local libraries
+        let all = MPMediaQuery.songs().items ?? []
+        for it in all {
+            if ids.contains(it.persistentID) {
+                result[it.persistentID] = it
+            }
+        }
+        return result
+    }
+
+    // MARK: - Cards & UI
+
+    private func statsCard(title: String, snapshot: StatsSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .frame(maxWidth: .infinity, alignment: .center) // centers horizontally
+                .padding(.top, 8)                               // adds a little space above
+            cardContent(for: snapshot)
+        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+        .padding(.horizontal)
+    }
+
+    private func cardContent(for snapshot: StatsSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("\(snapshot.uniqueSongCount)", systemImage: "play.circle")
+                Spacer()
+                Label(formatTime(snapshot.totalPlayDuration), systemImage: "clock")
+            }
+            .font(.subheadline)
+            .foregroundColor(.primary)
+
+            Divider()
+            HStack(alignment: .top, spacing: 24) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "music.mic")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Most Played Song")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text({
+                            guard let title = snapshot.mostPlayedSong?.title else { return "—" }
+                            if let c = snapshot.mostPlayedSongCount, c > 0 {
+                                return "\(title) (\(c))"
+                            }
+                            return title
+                        }())
+                        .font(.body)
+                        .lineLimit(2)
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "music.note.list")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Most Played Playlist")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(snapshot.mostPlayedPlaylist?.name ?? "—")
+                            .font(.body)
+                            .lineLimit(2)
+                    }
+                }
+            }
+        }
+        .padding()
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        if time >= 86400 {
+            let days = time / 86400
+            return String(format: "%.1f d", days)
+        }
+        let hours = Int(time) / 3600
+        let minutes = (Int(time) % 3600) / 60
+        if hours > 0 {
+            return String(format: "%02dh %02dm", hours, minutes)
+        } else {
+            return String(format: "%02dm", minutes)
+        }
     }
 }
