@@ -1,6 +1,7 @@
 import SwiftUI
 import MediaPlayer
 import AVFoundation
+import UIKit
 
 @main
 struct MusicShuffleApp: App {
@@ -153,7 +154,11 @@ final class PlayCountSnapshotStore: ObservableObject {
     static let shared = PlayCountSnapshotStore()
     private let snapshotsKey = "PlayCountSnapshots_v1"
     private let customBaselineKey = "CustomBaselineSnapshot_v1"
-    @Published private(set) var snapshots: [PlayCountSnapshot] = [] // sorted by date asc
+    @Published private(set) var snapshots: [PlayCountSnapshot] = [] // sorted asc; at most 1/day; up to ~90 days retained
+
+    private func isSameDay(_ a: Date, _ b: Date) -> Bool {
+        Calendar.current.isDate(a, inSameDayAs: b)
+    }
 
     private init() { load() }
 
@@ -168,9 +173,17 @@ final class PlayCountSnapshotStore: ObservableObject {
             map[it.persistentID] = it.playCount
         }
         let snap = PlayCountSnapshot(date: date, counts: map)
-        snapshots.append(snap)
+
+        // Keep at most one snapshot per calendar day: replace the existing one for today if present
+        if let idx = snapshots.lastIndex(where: { isSameDay($0.date, date) }) {
+            snapshots[idx] = snap
+        } else {
+            snapshots.append(snap)
+        }
         snapshots.sort { $0.date < $1.date }
-        trim(maxCount: 60) // keep up to ~2 months of daily snapshots
+
+        // Trim by number of distinct days retained (e.g., last 90 days)
+        trimByDays(maxDays: 90)
         save()
         return snap
     }
@@ -204,9 +217,12 @@ final class PlayCountSnapshotStore: ObservableObject {
         }
     }
 
-    private func trim(maxCount: Int) {
-        if snapshots.count > maxCount {
-            snapshots = Array(snapshots.suffix(maxCount))
+    private func trimByDays(maxDays: Int) {
+        // Snapshots are already one-per-day due to takeSnapshot replacement logic.
+        // If there are more than `maxDays`, drop the oldest.
+        let overflow = snapshots.count - maxDays
+        if overflow > 0 {
+            snapshots.removeFirst(overflow)
         }
     }
 
@@ -1399,6 +1415,18 @@ struct LabelInline: View {
 }
 
 
+// UIKit share sheet wrapper for SwiftUI
+struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    let applicationActivities: [UIActivity]? = nil
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
 // MARK: - Stats View
 
 struct StatsSnapshot {
@@ -1417,6 +1445,11 @@ struct StatsView: View {
 
     @State private var isSelectMode = false
     @State private var localSelectedIDs: Set<UInt64> = []
+
+    // Export state
+    @State private var exportURL: URL? = nil
+    @State private var isExportReady = false
+    @State private var showingShare = false
 
     private func loadSelectedPlaylistIDs() {
         let ids = statsSelectedPlaylistIDsRaw.split(separator: ",").compactMap { UInt64($0) }
@@ -1451,23 +1484,42 @@ struct StatsView: View {
                         .padding(.horizontal)
                 }
 
-                // Selection toolbar (mirrors Playlists tab)
-                HStack {
-                    Spacer()
-                    Button(isSelectMode ? "Done" : "Select Stats Playlists") {
-                        if isSelectMode {
-                            // Persist on exit of selection mode
-                            saveSelectedPlaylistIDs()
-                        } else {
-                            // Ensure local copy is synced before editing
-                            loadSelectedPlaylistIDs()
-                        }
-                        isSelectMode.toggle()
-                    }
-                    .padding(.trailing)
-                }
+                // Inline selection list moved to bottom when in selection mode
 
-                // Inline selection list when in selection mode
+                // Card 1: Last week
+                statsCard(title: "Last 7 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -7, to: Date())!))
+
+                // Card 2: Last month
+                statsCard(title: "Last 30 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -30, to: Date())!))
+
+                // Card 3: Custom (resettable)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Custom (since \(customStartDate.formatted(date: .abbreviated, time: .omitted)))")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            customStartDate = Date()
+                            snapshotStore.setCustomBaselineNow()
+                        } label: {
+                            Label("Reset", systemImage: "arrow.counterclockwise")
+                                .labelStyle(.titleAndIcon)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, -4)
+                    cardContent(for: computeSnapshot(since: customStartDate))
+                }
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+                .padding(.horizontal)
+
+                Spacer(minLength: 24)
+
+                Divider()
+                    .padding(.horizontal)
+
+                // Inline selection list moved to bottom when in selection mode
                 if isSelectMode {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Choose which playlists Stats should consider")
@@ -1505,39 +1557,41 @@ struct StatsView: View {
                     }
                 }
 
-                // Card 1: Last week
-                statsCard(title: "Last 7 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -7, to: Date())!))
-
-                // Card 2: Last month
-                statsCard(title: "Last 30 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -30, to: Date())!))
-
-                // Card 3: Custom (resettable)
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Custom (since \(customStartDate.formatted(date: .abbreviated, time: .omitted)))")
-                            .font(.headline)
-                        Spacer()
-                        Button {
-                            customStartDate = Date()
-                            snapshotStore.setCustomBaselineNow()
-                        } label: {
-                            Label("Reset", systemImage: "arrow.counterclockwise")
-                                .labelStyle(.titleAndIcon)
+                VStack(spacing: 12) {
+                    Button {
+                        do {
+                            let url = try exportSnapshotsTXT()
+                            exportURL = url
+                            showingShare = true
+                        } catch {
+                            print("Export failed: \(error)")
                         }
+                    } label: {
+                        Label("Export Snapshots (TXT)", systemImage: "square.and.arrow.up")
                     }
-                    .padding(.horizontal)
-                    cardContent(for: computeSnapshot(since: customStartDate))
-                }
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
-                .padding(.horizontal)
 
-                Spacer(minLength: 24)
+                    Button(isSelectMode ? "Done" : "Select Stats Playlists") {
+                        if isSelectMode {
+                            saveSelectedPlaylistIDs()
+                        } else {
+                            loadSelectedPlaylistIDs()
+                        }
+                        isSelectMode.toggle()
+                    }
+                }
+                .padding(.bottom, 20)
             }
         }
         .onAppear {
             loadPlaylists()
             loadSelectedPlaylistIDs()
             snapshotStore.ensureRecentSnapshot() // make sure we have at least one snapshot
+        }
+        // Share sheet presentation
+        .sheet(isPresented: $showingShare) {
+            if let url = exportURL {
+                ActivityView(activityItems: [url])
+            }
         }
     }
 
@@ -1557,7 +1611,11 @@ struct StatsView: View {
             if let custom = snapshotStore.getCustomBaseline(), custom.date >= start {
                 return custom
             }
-            return snapshotStore.snapshot(beforeOrOn: start)
+            if let snap = snapshotStore.snapshot(beforeOrOn: start) {
+                return snap
+            }
+            // Fallback: use earliest snapshot so we report plays since the first snapshot, not absolute counts
+            return snapshotStore.snapshots.first
         }()
 
         // Current counts from system (no app-logged events)
@@ -1568,7 +1626,16 @@ struct StatsView: View {
             currentCounts[it.persistentID] = it.playCount
         }
 
-        let baselineCounts = baseline?.counts ?? [:]
+        guard let baselineCounts = baseline?.counts else {
+            // If absolutely no snapshots exist, return an empty snapshot
+            return StatsSnapshot(
+                uniqueSongCount: 0,
+                totalPlayDuration: 0,
+                mostPlayedSong: nil,
+                mostPlayedSongCount: nil,
+                mostPlayedPlaylist: nil
+            )
+        }
 
         // Compute deltas (plays within the window)
         var deltaCounts: [UInt64: Int] = [:]
@@ -1630,6 +1697,104 @@ struct StatsView: View {
         )
     }
 
+    // MARK: - Export helpers
+    private func exportSnapshotsTXT() throws -> URL {
+        let text = buildSnapshotsText()
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let filename = "PlayHistorySnapshots_\(df.string(from: Date())).txt"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    private func buildSnapshotsText() -> String {
+        var out: [String] = []
+        let dateFmt = DateFormatter()
+        dateFmt.dateStyle = .medium
+        dateFmt.timeStyle = .short
+
+        // Summary
+        out.append("=== Play History Snapshots ===")
+        if let last = snapshotStore.snapshots.last?.date {
+            out.append("Last snapshot: \(dateFmt.string(from: last))")
+        } else {
+            out.append("Last snapshot: —")
+        }
+
+        if let custom = snapshotStore.getCustomBaseline()?.date {
+            out.append("Custom baseline snapshot: \(dateFmt.string(from: custom))")
+        } else {
+            out.append("Custom baseline snapshot: —")
+        }
+        out.append("")
+
+        // Resolve metadata for nicer lines
+        let allItems = MPMediaQuery.songs().items ?? []
+        var itemByID: [UInt64: MPMediaItem] = [:]
+        itemByID.reserveCapacity(allItems.count)
+        for it in allItems { itemByID[it.persistentID] = it }
+
+        // Index
+        out.append("=== Snapshot Index ===")
+        if snapshotStore.snapshots.isEmpty {
+            out.append("- (no snapshots)")
+        } else {
+            for snap in snapshotStore.snapshots {
+                let tracked = snap.counts.count
+                let sumCounts = snap.counts.values.reduce(0, +)
+                out.append("- \(dateFmt.string(from: snap.date)) | tracks tracked: \(tracked), total playCount sum: \(sumCounts)")
+            }
+        }
+        out.append("")
+
+        // Details (top 20 by count)
+        for snap in snapshotStore.snapshots {
+            out.append("=== Snapshot @ \(dateFmt.string(from: snap.date)) ===")
+            let top = snap.counts.sorted { $0.value > $1.value }.prefix(20)
+            if top.isEmpty {
+                out.append("(no items)")
+            } else {
+                for (id, c) in top {
+                    if let it = itemByID[id] {
+                        let title = it.title ?? "Unknown Title"
+                        let artist = it.artist ?? "Unknown Artist"
+                        out.append("• \(title) — \(artist) | count: \(c)")
+                    } else {
+                        out.append("• [\(id)] | count: \(c)")
+                    }
+                }
+            }
+            out.append("")
+        }
+
+        // Baselines used for windows
+        let weekStart = Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+        let monthStart = Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+        let weekSnap = snapshotStore.snapshot(beforeOrOn: weekStart)
+        let monthSnap = snapshotStore.snapshot(beforeOrOn: monthStart)
+        let earliest = snapshotStore.snapshots.first?.date
+
+        out.append("=== Window Baselines ===")
+        if let w = weekSnap?.date {
+            out.append("7d baseline: \(dateFmt.string(from: w))")
+        } else if let e = earliest {
+            out.append("7d baseline: \(dateFmt.string(from: e)) (earliest snapshot; no snapshot existed on/before window start)")
+        } else {
+            out.append("7d baseline: — (no snapshots available)")
+        }
+
+        if let m = monthSnap?.date {
+            out.append("30d baseline: \(dateFmt.string(from: m))")
+        } else if let e = earliest {
+            out.append("30d baseline: \(dateFmt.string(from: e)) (earliest snapshot; no snapshot existed on/before window start)")
+        } else {
+            out.append("30d baseline: — (no snapshots available)")
+        }
+
+        return out.joined(separator: "\n")
+    }
+
     private func lookupMediaItems(for ids: Set<UInt64>) -> [UInt64: MPMediaItem] {
         guard !ids.isEmpty else { return [:] }
         var result: [UInt64: MPMediaItem] = [:]
@@ -1650,6 +1815,7 @@ struct StatsView: View {
             Text(title)
                 .frame(maxWidth: .infinity, alignment: .center) // centers horizontally
                 .padding(.top, 8)                               // adds a little space above
+                .padding(.bottom, -4)
             cardContent(for: snapshot)
         }
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
