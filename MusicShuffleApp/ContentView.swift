@@ -859,17 +859,6 @@ struct PlaylistStatsView: View {
     // Local copy for mutation in view
     @State private var localSelectedIDs: Set<UInt64> = []
 
-    enum SortOption: String, CaseIterable, Identifiable {
-        case name = "Name"
-        case songs = "Songs"
-        case medianPPM = "Median PPM"
-        case total = "Total"
-        case played = "Played"
-        var id: String { rawValue }
-    }
-
-    @State private var sortOption: SortOption = .name
-
     struct Stats: Identifiable {
         let id = UUID()
         let playlist: MPMediaPlaylist
@@ -907,18 +896,8 @@ struct PlaylistStatsView: View {
             return Stats(playlist: playlist, songCount: songs.count, totalDuration: total, playedDuration: played, medianPPM: median)
         }
 
-        switch sortOption {
-        case .name:
-            return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        case .songs:
-            return base.sorted { $0.songCount > $1.songCount }
-        case .medianPPM:
-            return base.sorted { ($0.medianPPM.isNaN ? -Double.infinity : $0.medianPPM) > ($1.medianPPM.isNaN ? -Double.infinity : $1.medianPPM) }
-        case .total:
-            return base.sorted { $0.totalDuration > $1.totalDuration }
-        case .played:
-            return base.sorted { $0.playedDuration > $1.playedDuration }
-        }
+        // Always sort by name
+        return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     var body: some View {
@@ -991,34 +970,8 @@ struct PlaylistStatsView: View {
                         }
                     }
                 }
-                .animation(.easeInOut(duration: 0.3), value: sortOption)
                 .padding(.top)
             }
-
-            Divider()
-                .background(Color.gray.opacity(0.3))
-                .frame(height: 1)
-                .padding(.vertical, 8)
-                .padding(.horizontal)
-
-            // Sort picker moved below playlist cards
-            Picker("Sort by", selection: $sortOption) {
-                ForEach(SortOption.allCases) { option in
-                    Text(option.rawValue).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding()
-            .background(Color.green.opacity(0.2))
-            .cornerRadius(10)
-            .frame(height: 50)
-            .padding(.horizontal)
-
-            Divider()
-                .background(Color.gray.opacity(0.3))
-                .frame(height: 1)
-                .padding(.vertical, 8)
-                .padding(.horizontal)
 
             // "All Songs" card-style NavigationLink after the Picker, with contextMenu
             NavigationLink(destination: AllSongsView(musicPlayerHelper: musicPlayerHelper)) {
