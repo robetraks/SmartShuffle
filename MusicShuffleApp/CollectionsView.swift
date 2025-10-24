@@ -147,64 +147,67 @@ private struct CollectionCard: View {
         let totalTracks = playlists.reduce(0) { $0 + $1.items.count }
         let hueColor = colorForString(collection.name)
         let bgGradient = LinearGradient(colors: [hueColor.opacity(0.30), hueColor.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing)
-        let collage = artworkImages(from: playlists)
+        let images = artworkImages(from: playlists)
 
-        ZStack(alignment: .bottomTrailing) {
-            // Background layer with gradient, subtle stroke and shadow
+        ZStack(alignment: .center) {
+            // Background: gradient fallback
             RoundedRectangle(cornerRadius: 16)
                 .fill(bgGradient)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
-                )
                 .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
 
-            VStack(alignment: .leading, spacing: 8) {
-                // Artwork collage
-                if !collage.isEmpty {
-                    ArtworkCollageView(images: collage)
-                        .frame(height: 72)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(LinearGradient(colors: [Color.black.opacity(0.0), Color.black.opacity(0.15)], startPoint: .top, endPoint: .bottom))
-                        )
-                } else {
-                    // Placeholder symbol when no artwork
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.white.opacity(0.08))
-                        Image(systemName: "square.grid.2x2")
-                            .font(.title3)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                    .frame(height: 72)
-                }
+            // Mosaic artwork filling the card (if available)
+            if !images.isEmpty {
+                ArtworkMosaicBackground(images: images)
+                    .opacity(0.68) // dim artwork to improve foreground readability
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        // Stronger readability gradient from top (subtle) to bottom (darker)
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(
+                                LinearGradient(colors: [Color.black.opacity(0.12), Color.black.opacity(0.58)],
+                                               startPoint: .top,
+                                               endPoint: .bottom)
+                            )
+                    )
+            }
 
+            // Card border overlay
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
+
+            // Large translucent play glyph overlay (now above artwork)
+            GeometryReader { geo in
+                let size = min(geo.size.width, geo.size.height)
+                Image(systemName: "play.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size * 0.7, height: size * 0.7)
+                    .foregroundColor(Color.white.opacity(0.42)) // less transparent for better visibility
+                    .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+            }
+            .allowsHitTesting(false)
+
+            // Foreground content
+            VStack(alignment: .leading, spacing: 8) {
                 // Title
                 Text(collection.name)
-                    .font(.headline)
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
+                    .font(.system(size: dynamicFontSize(for: collection.name), weight: .semibold))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.7), radius: 3, x: 0, y: 1)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
 
                 Spacer(minLength: 0)
 
-                // Metadata chips: playlists + total tracks
+                // Metadata chips: playlists + total tracks (icon + number)
                 HStack(spacing: 8) {
-                    Chip(text: "\(count) playlists")
-                    Chip(text: "\(totalTracks) tracks")
+                    StatChip(systemImage: "music.note.list", valueText: "\(count)")
+                    StatChip(systemImage: "music.note", valueText: "\(totalTracks)")
                     Spacer()
                 }
             }
             .padding(12)
-
-            // Play affordance glyph
-            Image(systemName: "play.circle.fill")
-                .font(.system(size: 28))
-                .foregroundColor(.white)
-                .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
-                .padding(10)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 160)
@@ -238,12 +241,57 @@ private struct CollectionCard: View {
     private func artworkImages(from playlists: [MPMediaPlaylist]) -> [UIImage] {
         var images: [UIImage] = []
         for pl in playlists {
-            if images.count >= 4 { break }
-            if let img = pl.items.first?.artwork?.image(at: CGSize(width: 80, height: 80)) {
+            // Collect first artwork from each playlist
+            if let img = pl.items.first?.artwork?.image(at: CGSize(width: 120, height: 120)) {
                 images.append(img)
             }
         }
         return images
+    }
+
+    // Heuristic dynamic font size based on name length and typical card width
+    private func dynamicFontSize(for name: String) -> CGFloat {
+        let baseMin: CGFloat = 16
+        let baseMax: CGFloat = 32 // keep within card height
+        let len = max(name.count, 1)
+        // Assume average available width around 200pt in adaptive grid
+        let targetWidth: CGFloat = 200
+        let avgCharFactor: CGFloat = 0.55 // estimated average glyph width factor
+        let computed = targetWidth / (CGFloat(len) * avgCharFactor)
+        return min(max(computed, baseMin), baseMax)
+    }
+}
+
+private struct ArtworkMosaicBackground: View {
+    let images: [UIImage]
+    private let maxTiles = 12 // cap for performance while still giving rich mosaic
+
+    var body: some View {
+        let imgs = Array(images.prefix(maxTiles))
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            // Determine grid size based on number of images
+            let n = max(imgs.count, 1)
+            let cols = Int(ceil(sqrt(Double(n))))
+            let rows = Int(ceil(Double(n) / Double(cols)))
+            let tileW = w / CGFloat(cols)
+            let tileH = h / CGFloat(rows)
+
+            ZStack {
+                ForEach(imgs.indices, id: \.self) { idx in
+                    let row = idx / cols
+                    let col = idx % cols
+                    Image(uiImage: imgs[idx])
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: tileW, height: tileH)
+                        .clipped()
+                        .position(x: tileW * (CGFloat(col) + 0.5),
+                                  y: tileH * (CGFloat(row) + 0.5))
+                }
+            }
+        }
     }
 }
 
@@ -282,15 +330,21 @@ private struct ArtworkCollageView: View {
     }
 }
 
-private struct Chip: View {
-    let text: String
+private struct StatChip: View {
+    let systemImage: String
+    let valueText: String
     var body: some View {
-        Text(text)
-            .font(.caption)
-            .foregroundColor(.white.opacity(0.95))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(Color.black.opacity(0.25)))
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.caption)
+            Text(valueText)
+                .font(.caption)
+                .fontWeight(.semibold)
+        }
+        .foregroundColor(.white) // stronger contrast
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(Color.black.opacity(0.45))) // darker chip bg for readability
     }
 }
 
