@@ -1,6 +1,7 @@
 // filepath: /Users/akshayj/GitHubRepos/SmartShuffle/MusicShuffleApp/CollectionsView.swift
 import SwiftUI
 import MediaPlayer
+import UIKit
 
 struct CollectionsTabView: View {
     @EnvironmentObject private var collectionsStore: CollectionsStore
@@ -14,9 +15,9 @@ struct CollectionsTabView: View {
 
     enum EditorMode { case create, edit }
 
+    // Use adaptive grid for better density on wider screens
     private let gridColumns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
+        GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)
     ]
 
     var body: some View {
@@ -39,16 +40,20 @@ struct CollectionsTabView: View {
 
                 if collectionsStore.collections.isEmpty {
                     VStack(spacing: 12) {
-                        Text("No collections yet")
-                            .font(.headline)
+                        Image(systemName: "square.grid.2x2")
+                            .font(.system(size: 40))
+                            .foregroundColor(.secondary)
+                        Text("Group playlists into collections and play one at random.")
+                            .multilineTextAlignment(.center)
                             .foregroundColor(.secondary)
                         Button(action: {
                             editingCollection = nil
                             editorMode = .create
                             showingEditor = true
                         }) {
-                            Label("Add Collection", systemImage: "plus")
+                            Label("Create your first collection", systemImage: "plus")
                         }
+                        .buttonStyle(.borderedProminent)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -116,10 +121,14 @@ struct CollectionsTabView: View {
         guard let random = candidates.randomElement() else { return }
         let songs = random.items
         guard !songs.isEmpty else { return }
+        // Haptic pre-play feedback
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         musicPlayerHelper.nonShuffledSongs = songs
         musicPlayerHelper.shuffleSongs()
         musicPlayerHelper.shuffledSongs = musicPlayerHelper.shuffledSongs
         musicPlayerHelper.playSongs()
+        // Success haptic
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 }
 
@@ -130,36 +139,158 @@ private struct CollectionCard: View {
     let editAction: () -> Void
     let deleteAction: () -> Void
 
+    @State private var tapBump: Bool = false
+
     var body: some View {
         let playlists = playlistsResolver(collection.playlistIDs)
         let count = playlists.count
+        let totalTracks = playlists.reduce(0) { $0 + $1.items.count }
+        let hueColor = colorForString(collection.name)
+        let bgGradient = LinearGradient(colors: [hueColor.opacity(0.30), hueColor.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        let collage = artworkImages(from: playlists)
 
-        VStack(alignment: .leading, spacing: 8) {
-            Text(collection.name)
-                .font(.headline)
-                .foregroundColor(.primary)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer()
-            HStack {
-                Label("\(count)", systemImage: "music.note.list")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                Spacer()
+        ZStack(alignment: .bottomTrailing) {
+            // Background layer with gradient, subtle stroke and shadow
+            RoundedRectangle(cornerRadius: 16)
+                .fill(bgGradient)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
+                )
+                .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+
+            VStack(alignment: .leading, spacing: 8) {
+                // Artwork collage
+                if !collage.isEmpty {
+                    ArtworkCollageView(images: collage)
+                        .frame(height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(LinearGradient(colors: [Color.black.opacity(0.0), Color.black.opacity(0.15)], startPoint: .top, endPoint: .bottom))
+                        )
+                } else {
+                    // Placeholder symbol when no artwork
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.white.opacity(0.08))
+                        Image(systemName: "square.grid.2x2")
+                            .font(.title3)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                    .frame(height: 72)
+                }
+
+                // Title
+                Text(collection.name)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+
+                Spacer(minLength: 0)
+
+                // Metadata chips: playlists + total tracks
+                HStack(spacing: 8) {
+                    Chip(text: "\(count) playlists")
+                    Chip(text: "\(totalTracks) tracks")
+                    Spacer()
+                }
             }
+            .padding(12)
+
+            // Play affordance glyph
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 28))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
+                .padding(10)
         }
-        .padding()
         .frame(maxWidth: .infinity)
-        .frame(height: 140)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.blue.opacity(0.18)))
-        .onTapGesture { playAction() }
+        .frame(height: 160)
+        .scaleEffect(tapBump ? 0.98 : 1.0)
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: tapBump)
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .onTapGesture {
+            tapBump = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                tapBump = false
+            }
+            playAction()
+        }
         .contextMenu {
-            Button("Play Collection", action: playAction)
-            Button("Edit Collection", action: editAction)
-            Button(role: .destructive) { deleteAction() } label: { Text("Delete Collection") }
+            Button(action: playAction) { Label("Play Collection", systemImage: "play.circle") }
+            Button(action: editAction) { Label("Edit Collection", systemImage: "pencil") }
+            Button(role: .destructive) { deleteAction() } label: { Label("Delete Collection", systemImage: "trash") }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Collection \(collection.name), \(count) playlists")
+        .accessibilityLabel("Collection \(collection.name), \(count) playlists, \(totalTracks) tracks")
+    }
+
+    private func colorForString(_ s: String) -> Color {
+        var hasher = Hasher()
+        hasher.combine(s)
+        let hash = hasher.finalize()
+        let hue = Double(abs(hash % 360)) / 360.0
+        return Color(hue: hue, saturation: 0.65, brightness: 0.70)
+    }
+
+    private func artworkImages(from playlists: [MPMediaPlaylist]) -> [UIImage] {
+        var images: [UIImage] = []
+        for pl in playlists {
+            if images.count >= 4 { break }
+            if let img = pl.items.first?.artwork?.image(at: CGSize(width: 80, height: 80)) {
+                images.append(img)
+            }
+        }
+        return images
+    }
+}
+
+private struct ArtworkCollageView: View {
+    let images: [UIImage]
+    var body: some View {
+        let imgs = Array(images.prefix(4))
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let halfW = w / 2
+            let halfH = h / 2
+            ZStack {
+                if imgs.indices.contains(0) {
+                    Image(uiImage: imgs[0]).resizable().scaledToFill()
+                        .frame(width: halfW, height: halfH).clipped()
+                        .position(x: halfW/2, y: halfH/2)
+                }
+                if imgs.indices.contains(1) {
+                    Image(uiImage: imgs[1]).resizable().scaledToFill()
+                        .frame(width: halfW, height: halfH).clipped()
+                        .position(x: w - halfW/2, y: halfH/2)
+                }
+                if imgs.indices.contains(2) {
+                    Image(uiImage: imgs[2]).resizable().scaledToFill()
+                        .frame(width: halfW, height: halfH).clipped()
+                        .position(x: halfW/2, y: h - halfH/2)
+                }
+                if imgs.indices.contains(3) {
+                    Image(uiImage: imgs[3]).resizable().scaledToFill()
+                        .frame(width: halfW, height: halfH).clipped()
+                        .position(x: w - halfW/2, y: h - halfH/2)
+                }
+            }
+        }
+    }
+}
+
+private struct Chip: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundColor(.white.opacity(0.95))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.black.opacity(0.25)))
     }
 }
 
