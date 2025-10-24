@@ -6,13 +6,16 @@ import UIKit
 @main
 struct MusicShuffleApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var mediaStore = MediaLibraryStore()
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(mediaStore)
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
-                _ = PlayCountSnapshotStore.shared.takeSnapshot()
+                // Take snapshot asynchronously to avoid blocking the main thread at activation
+                PlayCountSnapshotStore.shared.ensureRecentSnapshot()
             }
         }
     }
@@ -25,9 +28,8 @@ func calculatePPM(_ song: MPMediaItem) -> Double {
 }
 
 struct ContentView: View {
-    @State private var playlists: [MPMediaPlaylist] = []
+    @EnvironmentObject private var mediaStore: MediaLibraryStore
     @State private var selectedPlaylist: MPMediaPlaylist? = nil
-    @State private var isAuthorized = false
     @State private var showError = false
     @State private var errorMessage = ""
     @StateObject private var musicPlayerHelper = MusicPlayerHelper()
@@ -37,9 +39,9 @@ struct ContentView: View {
             // Tab 1: Playlists (existing functionality)
             NavigationView {
                 VStack {
-                    PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: playlists, musicPlayerHelper: musicPlayerHelper)
+                    PlaylistStatsView(selectedPlaylist: $selectedPlaylist, playlists: mediaStore.playlists, musicPlayerHelper: musicPlayerHelper)
                         .onAppear {
-                            requestAuthorization()
+                            mediaStore.requestAuthorizationAndLoad()
                         }
                     NowPlayingView(song: musicPlayerHelper.currentSong)
                 }
@@ -59,90 +61,66 @@ struct ContentView: View {
                 Label("Stats", systemImage: "chart.bar")
             }
         }
+        .onChange(of: mediaStore.authorizationErrorMessage) { _, newMsg in
+            if let msg = newMsg {
+                errorMessage = msg
+                showError = true
+            } else {
+                showError = false
+            }
+        }
         .alert("Error", isPresented: $showError) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(errorMessage)
         }
     }
-
-    private func requestAuthorization() {
-        let status = MPMediaLibrary.authorizationStatus()
-        if status == .denied || status == .restricted {
-            errorMessage = "Please enable Music access in Settings"
-            showError = true
-        } else if status == .authorized {
-            isAuthorized = true
-            fetchPlaylists()
-        } else if status == .notDetermined {
-            MPMediaLibrary.requestAuthorization { newStatus in
-                if newStatus == .authorized {
-                    DispatchQueue.main.async {
-                        isAuthorized = true
-                        fetchPlaylists()
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        errorMessage = "Music access is required for this app"
-                        showError = true
-                    }
-                }
-            }
-        }
-    }
-
-    private func fetchPlaylists() {
-        let query = MPMediaQuery.playlists()
-        if let items = query.collections as? [MPMediaPlaylist] {
-            playlists = items.filter { !$0.items.isEmpty } // Filter out empty playlists
-        }
-    }
 }
 
-// MARK: - Play History Store
+ // MARK: - Play History Store
 
-struct PlayEvent: Codable, Hashable {
-    let songPersistentID: UInt64
-    let timestamp: Date
-}
+ struct PlayEvent: Codable, Hashable {
+     let songPersistentID: UInt64
+     let timestamp: Date
+ }
 
-final class PlayHistoryStore: ObservableObject {
-    static let shared = PlayHistoryStore()
-    private let storageKey = "PlayHistoryEvents_v1"
-    @Published private(set) var events: [PlayEvent] = []
+ final class PlayHistoryStore: ObservableObject {
+     static let shared = PlayHistoryStore()
+     private let storageKey = "PlayHistoryEvents_v1"
+     @Published private(set) var events: [PlayEvent] = []
 
-    private init() {
-        load()
-    }
+     private init() {
+         load()
+     }
 
-    func recordPlay(_ item: MPMediaItem?) {
-        guard let item = item else { return }
-        let ev = PlayEvent(songPersistentID: item.persistentID, timestamp: Date())
-        events.append(ev)
-        save()
-    }
+     func recordPlay(_ item: MPMediaItem?) {
+         guard let item = item else { return }
+         let ev = PlayEvent(songPersistentID: item.persistentID, timestamp: Date())
+         events.append(ev)
+         save()
+     }
 
-    func reset(from date: Date) {
-        // No-op: we keep all events; filtering is done at query time relative to a "custom start" date
-        // Keeping events lets us show stats for any window later.
-    }
+     func reset(from date: Date) {
+         // No-op: we keep all events; filtering is done at query time relative to a "custom start" date
+         // Keeping events lets us show stats for any window later.
+     }
 
-    private func save() {
-        do {
-            let data = try JSONEncoder().encode(events)
-            UserDefaults.standard.set(data, forKey: storageKey)
-        } catch {
-            // Ignore save failures silently for now
-        }
-    }
+     private func save() {
+         do {
+             let data = try JSONEncoder().encode(events)
+             UserDefaults.standard.set(data, forKey: storageKey)
+         } catch {
+             // Ignore save failures silently for now
+         }
+     }
 
-    private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
-        if let loaded = try? JSONDecoder().decode([PlayEvent].self, from: data) {
-            events = loaded
-        }
-    }
-}
+     private func load() {
+         guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
+         if let loaded = try? JSONDecoder().decode([PlayEvent].self, from: data) {
+             events = loaded
+         }
+     }
+ }
 
 // MARK: - System PlayCount Snapshot Store (system-history only)
 struct PlayCountSnapshot: Codable {
@@ -155,6 +133,7 @@ final class PlayCountSnapshotStore: ObservableObject {
     private let snapshotsKey = "PlayCountSnapshots_v1"
     private let customBaselineKey = "CustomBaselineSnapshot_v1"
     @Published private(set) var snapshots: [PlayCountSnapshot] = [] // sorted asc; at most 1/day; up to ~90 days retained
+    @Published var isSnapshotInProgress: Bool = false
 
     private func isSameDay(_ a: Date, _ b: Date) -> Bool {
         Calendar.current.isDate(a, inSameDayAs: b)
@@ -188,12 +167,60 @@ final class PlayCountSnapshotStore: ObservableObject {
         return snap
     }
 
-    // Ensure we have a recent snapshot (e.g., at least one per day)
-    func ensureRecentSnapshot(maxAge hours: Double = 24) {
-        if let last = snapshots.last, Date().timeIntervalSince(last.date) < hours * 3600 {
+    // Async variant: performs the heavy media query on a background queue and updates snapshots on the main actor.
+    func takeSnapshotAsync(date: Date = Date()) {
+        // Prevent concurrent runs
+        if isSnapshotInProgress {
             return
         }
-        _ = takeSnapshot()
+        DispatchQueue.main.async { [weak self] in
+            self?.isSnapshotInProgress = true
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let songs = MPMediaQuery.songs().items ?? []
+            if songs.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isSnapshotInProgress = false
+                }
+                return
+            }
+            var map: [UInt64: Int] = [:]
+            map.reserveCapacity(songs.count)
+            for it in songs {
+                map[it.persistentID] = it.playCount
+            }
+            let snap = PlayCountSnapshot(date: date, counts: map)
+
+            DispatchQueue.main.async {
+                // Update snapshots on main thread to keep @Published consistent
+                if let idx = self.snapshots.lastIndex(where: { self.isSameDay($0.date, date) }) {
+                    self.snapshots[idx] = snap
+                } else {
+                    self.snapshots.append(snap)
+                }
+                self.snapshots.sort { $0.date < $1.date }
+                self.trimByDays(maxDays: 90)
+                self.save()
+                self.isSnapshotInProgress = false
+            }
+        }
+    }
+    
+    // Ensure we have a recent snapshot (e.g., at least one per day)
+    func ensureRecentSnapshot(maxAge hours: Double = 24) {
+        let now = Date()
+        if let last = snapshots.last {
+            // If we don't have a snapshot for today, take one now
+            if !Calendar.current.isDate(last.date, inSameDayAs: now) {
+                takeSnapshotAsync(date: now)
+            } else {
+                // Optional: If you want to refresh the time within the same day, you could call takeSnapshotAsync here.
+                // Currently we keep at most one per day and skip if already taken today.
+            }
+        } else {
+            takeSnapshotAsync(date: now)
+        }
     }
 
     func snapshot(beforeOrOn date: Date) -> PlayCountSnapshot? {
@@ -249,22 +276,19 @@ class MusicPlayerHelper: ObservableObject {
     @Published var timer: Timer?
     @Published var progress: Double = 0
     init() {
+        // Start observing now-playing changes once. Avoid duplicated work on repeated helper instantiation.
         musicPlayer.beginGeneratingPlaybackNotifications()
         self.currentSong = musicPlayer.nowPlayingItem // Set initial song
 
-        NotificationCenter.default.addObserver(
-            forName: .MPMusicPlayerControllerNowPlayingItemDidChange,
-            object: musicPlayer,
-            queue: .main
-        ) { [weak self] _ in
+        NotificationCenter.default.addObserver(forName: .MPMusicPlayerControllerNowPlayingItemDidChange, object: musicPlayer, queue: .main) { [weak self] _ in
             self?.currentSong = self?.musicPlayer.nowPlayingItem
             if let newItem = self?.musicPlayer.nowPlayingItem {
                 PlayHistoryStore.shared.recordPlay(newItem)
             }
         }
 
-        musicPlayer.beginGeneratingPlaybackNotifications()
-        musicPlayer.prepareToPlay()
+        // Avoid calling prepareToPlay eagerly here (can be expensive on some devices/libraries).
+        // prepareToPlay will be invoked shortly before playback in playCurrentSong().
     }
     func playSongs() {
         playCurrentSong()
@@ -446,7 +470,7 @@ struct PlaylistView: View {
     let playlist: MPMediaPlaylist
 
     @State private var playlistSongs: [MPMediaItem] = []
-    @ObservedObject private var musicPlayerHelper = MusicPlayerHelper()
+    @ObservedObject var musicPlayerHelper: MusicPlayerHelper
 
     var body: some View {
         VStack {
@@ -553,9 +577,10 @@ struct AllSongsView: View {
         case smart = "Smart Shuffle"
         var id: String { rawValue }
     }
-
+ 
+    @EnvironmentObject private var mediaStore: MediaLibraryStore
     @State private var allSongs: [MPMediaItem] = []
-    @ObservedObject private var musicPlayerHelper = MusicPlayerHelper()
+    @ObservedObject var musicPlayerHelper: MusicPlayerHelper
     @State private var sortAscending = true
     @State private var minMonthsText = "0"
     @State private var sortMode: SortMode = .ppm
@@ -636,7 +661,7 @@ struct AllSongsView: View {
                                 .foregroundColor(.blue)
                         }
                     }
-                    SongRow(song: song, calculatePPM: calculatePPM(_:))
+                    SongRow(song: song, calculatePPM: { mediaStore.ppm(for: $0) })
                 }
             }
 
@@ -664,87 +689,89 @@ struct AllSongsView: View {
             .font(.headline)
         }
         .onAppear {
-            fetchAllSongs()
+            allSongs = mediaStore.allSongs
+            if allSongs.isEmpty { mediaStore.loadSongs() }
+            musicPlayerHelper.nonShuffledSongs = allSongs
+            musicPlayerHelper.shuffleSongs()
+            allSongs = musicPlayerHelper.shuffledSongs
+            updateSortedSongs()
         }
         .onDisappear {
             musicPlayerHelper.timer?.invalidate()
         }
         .onChange(of: sortMode) { _, _ in updateSortedSongs() }
         .onChange(of: sortAscending) { _, _ in updateSortedSongs() }
-    }
-
-    private func fetchAllSongs() {
-        let query = MPMediaQuery.songs()
-        if let items = query.items {
-            allSongs = items
-        }
-        musicPlayerHelper.nonShuffledSongs = allSongs
-        musicPlayerHelper.shuffleSongs()
-        allSongs = musicPlayerHelper.shuffledSongs
-        updateSortedSongs()
-    }
-
-    private func updateSortedSongs() {
-        switch sortMode {
-        case .ppm:
-            sortedSongs = allSongs.sorted { a, b in
-                let v0 = calculatePPM(a)
-                let v1 = calculatePPM(b)
-                // Place NaN values at the end
-                if v0.isNaN && v1.isNaN { return false }
-                if v0.isNaN { return false }
-                if v1.isNaN { return true }
-                return sortAscending ? v0 < v1 : v0 > v1
-            }
-        case .smart:
-            sortedSongs = allSongs
+        .onChange(of: mediaStore.allSongs) { _, new in
+            allSongs = new
+            musicPlayerHelper.nonShuffledSongs = allSongs
+            musicPlayerHelper.shuffleSongs()
+            allSongs = musicPlayerHelper.shuffledSongs
+            updateSortedSongs()
         }
     }
+ 
+     private func updateSortedSongs() {
+         switch sortMode {
+         case .ppm:
+             // Compute using cached PPM from mediaStore
+             sortedSongs = allSongs.sorted { a, b in
+                 let v0 = mediaStore.ppm(for: a)
+                 let v1 = mediaStore.ppm(for: b)
+                 // Place NaN values at the end
+                 if v0.isNaN && v1.isNaN { return false }
+                 if v0.isNaN { return false }
+                 if v1.isNaN { return true }
+                 return sortAscending ? v0 < v1 : v0 > v1
+             }
+         case .smart:
+             sortedSongs = allSongs
+         }
+     }
 
-    private var filteredAndSortedSongs: [MPMediaItem] {
-        sortedSongs.filter {
-            guard let addedDate = $0.value(forKey: "dateAdded") as? Date else { return false }
-            let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
-            return months > minMonths
-        }
-    }
+     private var filteredAndSortedSongs: [MPMediaItem] {
+         sortedSongs.filter {
+             guard let addedDate = $0.value(forKey: "dateAdded") as? Date else { return false }
+             let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+             return months > minMonths
+         }
+     }
 
-    private func calculatePPM1(_ song: MPMediaItem) -> Double {
-        guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
-        let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
-        if months == 0 { return .nan }
-        return Double(song.playCount - song.skipCount) / Double(months)
-    }
+     private func calculatePPM1(_ song: MPMediaItem) -> Double {
+         guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return .nan }
+         let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
+         if months == 0 { return .nan }
+         return Double(song.playCount - song.skipCount) / Double(months)
+     }
 
-    // Playlist creation logic
-    private func createOrRewritePlaylist() {
-        let title = "Songs2BeRemoved"
-        let metadata = MPMediaPlaylistCreationMetadata(name: title)
-        // Look for existing playlist by name
-        let query = MPMediaQuery.playlists()
-        if let playlists = query.collections as? [MPMediaPlaylist],
-           let existing = playlists.first(where: { $0.name == title }) {
-            // For existing playlists, we'll just add the selected songs
-            // Note: MPMediaPlaylist doesn't have a direct remove method in the public API
-            addSelected(to: existing)
-        } else {
-            // Create new playlist
-            MPMediaLibrary.default().getPlaylist(with: UUID(), creationMetadata: metadata) { playlist, error in
-                guard let playlist = playlist else { return }
-                addSelected(to: playlist)
-            }
-        }
-    }
+     // Playlist creation logic
+     private func createOrRewritePlaylist() {
+         let title = "Songs2BeRemoved"
+         let metadata = MPMediaPlaylistCreationMetadata(name: title)
+         // Look for existing playlist by name
+         let query = MPMediaQuery.playlists()
+         if let playlists = query.collections as? [MPMediaPlaylist],
+            let existing = playlists.first(where: { $0.name == title }) {
+             // For existing playlists, we'll just add the selected songs
+             // Note: MPMediaPlaylist doesn't have a direct remove method in the public API
+             addSelected(to: existing)
+         } else {
+             // Create new playlist
+             MPMediaLibrary.default().getPlaylist(with: UUID(), creationMetadata: metadata) { playlist, error in
+                 guard let playlist = playlist else { return }
+                 addSelected(to: playlist)
+             }
+         }
+     }
 
-    private func addSelected(to playlist: MPMediaPlaylist) {
-        let songsToAdd = allSongs.filter { selectedIDs.contains($0.persistentID) }
-        if !songsToAdd.isEmpty {
-            playlist.add(songsToAdd) { error in
-                // Optionally handle error or notify user here
-            }
-        }
-    }
-}
+     private func addSelected(to playlist: MPMediaPlaylist) {
+         let songsToAdd = allSongs.filter { selectedIDs.contains($0.persistentID) }
+         if !songsToAdd.isEmpty {
+             playlist.add(songsToAdd) { error in
+                 // Optionally handle error or notify user here
+             }
+         }
+     }
+ }
 
 // SongRow view for displaying a song (factored out from SongListView)
 struct SongRow: View {
@@ -815,6 +842,7 @@ struct PlaylistStatsView: View {
     @Binding var selectedPlaylist: MPMediaPlaylist?
     let playlists: [MPMediaPlaylist]
     @ObservedObject var musicPlayerHelper: MusicPlayerHelper
+    @EnvironmentObject private var mediaStore: MediaLibraryStore
 
     @AppStorage("selectedPlaylistIDs") private var selectedPlaylistIDsRaw: String = ""
     @State private var selectedPlaylistIDs: Set<UInt64> = []
@@ -926,7 +954,7 @@ struct PlaylistStatsView: View {
                                 }
                                 .padding(.leading)
                             }
-                            NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist)) {
+                            NavigationLink(destination: PlaylistView(selectedPlaylist: $selectedPlaylist, playlist: stat.playlist, musicPlayerHelper: musicPlayerHelper)) {
                                 HStack(spacing: 12) {
                                     Text(stat.name)
                                         .font(.headline)
@@ -993,41 +1021,26 @@ struct PlaylistStatsView: View {
                 .padding(.horizontal)
 
             // "All Songs" card-style NavigationLink after the Picker, with contextMenu
-            NavigationLink(destination: AllSongsView()) {
+            NavigationLink(destination: AllSongsView(musicPlayerHelper: musicPlayerHelper)) {
                 HStack {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("All Songs")
                             .font(.headline)
-                        let songs = MPMediaQuery.songs().items ?? []
-                        let total = songs.reduce(0) { $0 + $1.playbackDuration }
-                        let played = songs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }
-                        // Median PPM for all songs
-                        let allPPM = songs.compactMap { song -> Double? in
-                            guard let addedDate = song.value(forKey: "dateAdded") as? Date else { return nil }
-                            let months = Calendar.current.dateComponents([.month], from: addedDate, to: Date()).month ?? 0
-                            if months <= 0 { return nil }
-                            return Double(song.playCount - song.skipCount) / Double(months)
-                        }.sorted()
-                        let medianAllPPM: Double = {
-                            guard !allPPM.isEmpty else { return .nan }
-                            let mid = allPPM.count / 2
-                            if allPPM.count % 2 == 0 {
-                                return (allPPM[mid - 1] + allPPM[mid]) / 2.0
-                            } else {
-                                return allPPM[mid]
-                            }
-                        }()
+                        let summary = mediaStore.librarySummary
                         HStack(spacing: 16) {
-                            Label("\(songs.count)", systemImage: "music.note.list")
+                            Label("\(summary?.songCount ?? mediaStore.allSongs.count)", systemImage: "music.note.list")
                             HStack(spacing: 4) {
                                 Image(systemName: "chart.bar")
-                                    .foregroundColor(medianAllPPM.isNaN ? .secondary : .blue)
-                                Text(medianAllPPM.isNaN ? "--" : String(format: "%.2f", medianAllPPM))
+                                    .foregroundColor((summary?.medianPPM == nil) ? .secondary : .blue)
+                                Text({
+                                    if let v = summary?.medianPPM { return String(format: "%.2f", v) }
+                                    return "--"
+                                }())
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                             }
-                            Label(formatTime(total), systemImage: "clock")
-                            Label(formatTime(played), systemImage: "play.circle")
+                            Label(formatTime(summary?.totalDuration ?? mediaStore.allSongs.reduce(0) { $0 + $1.playbackDuration }), systemImage: "clock")
+                            Label(formatTime(summary?.playedDuration ?? mediaStore.allSongs.reduce(0.0) { $0 + (Double($1.playCount) * $1.playbackDuration) }), systemImage: "play.circle")
                         }
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -1043,8 +1056,8 @@ struct PlaylistStatsView: View {
             }
             .contextMenu {
                 Button("Play Now") {
-                    let helper = MusicPlayerHelper()
-                    let songs = MPMediaQuery.songs().items ?? []
+                    let helper = musicPlayerHelper
+                    let songs = mediaStore.allSongs
                     helper.nonShuffledSongs = songs
                     helper.shuffleSongs()
                     helper.shuffledSongs = helper.shuffledSongs
@@ -1439,6 +1452,7 @@ struct StatsSnapshot {
 
 struct StatsView: View {
     @ObservedObject private var snapshotStore = PlayCountSnapshotStore.shared
+    @EnvironmentObject private var mediaStore: MediaLibraryStore
     @State private var allPlaylists: [MPMediaPlaylist] = []
     @AppStorage("customStatsStartDate") private var customStartDate: Date = Date()
     @AppStorage("statsSelectedPlaylistIDs") private var statsSelectedPlaylistIDsRaw: String = ""
@@ -1472,19 +1486,30 @@ struct StatsView: View {
                 Text("Playing Activity")
                     .font(.largeTitle).bold()
                     .padding(.horizontal)
-                if let last = snapshotStore.snapshots.last?.date {
-                    Text("Last snapshot: \(last.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal)
-                } else {
-                    Text("Last snapshot: —")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal)
+                HStack(spacing: 8) {
+                    if let last = snapshotStore.snapshots.last?.date {
+                        Text("Last snapshot: \(last.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Last snapshot: —")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if snapshotStore.isSnapshotInProgress {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle())
+                            .scaleEffect(0.8)
+                    }
+                    Spacer()
+                    Button {
+                        snapshotStore.takeSnapshotAsync()
+                    } label: {
+                        Label("Take Snapshot", systemImage: "camera.on.rectangle")
+                    }
+                    .disabled(snapshotStore.isSnapshotInProgress)
                 }
-
-                // Inline selection list moved to bottom when in selection mode
+                .padding(.horizontal)
 
                 // Card 1: Last week
                 statsCard(title: "Last 7 Days", snapshot: computeSnapshot(since: Calendar.current.date(byAdding: .day, value: -7, to: Date())!))
@@ -1583,302 +1608,288 @@ struct StatsView: View {
             }
         }
         .onAppear {
-            loadPlaylists()
+            allPlaylists = mediaStore.playlists
             loadSelectedPlaylistIDs()
             snapshotStore.ensureRecentSnapshot() // make sure we have at least one snapshot
         }
-        // Share sheet presentation
-        .sheet(isPresented: $showingShare) {
-            if let url = exportURL {
-                ActivityView(activityItems: [url])
-            }
+        .onChange(of: mediaStore.playlists) { _, new in
+            allPlaylists = new
         }
-    }
+         // Share sheet presentation
+         .sheet(isPresented: $showingShare) {
+             if let url = exportURL {
+                 ActivityView(activityItems: [url])
+             }
+         }
+     }
 
-    private func loadPlaylists() {
-        let query = MPMediaQuery.playlists()
-        if let items = query.collections as? [MPMediaPlaylist] {
-            allPlaylists = items
-        }
-    }
+     // Build a StatsSnapshot for events since a given date using system play count deltas from snapshots
+     private func computeSnapshot(since start: Date) -> StatsSnapshot {
+         // Determine baseline snapshot:
+         // - For Custom window, prefer custom baseline if present and newer than start.
+         // - Otherwise, use the latest snapshot taken on/before `start`.
+         let baseline: PlayCountSnapshot? = {
+             if let custom = snapshotStore.getCustomBaseline(), custom.date >= start {
+                 return custom
+             }
+             if let snap = snapshotStore.snapshot(beforeOrOn: start) {
+                 return snap
+             }
+             // Fallback: use earliest snapshot so we report plays since the first snapshot, not absolute counts
+             return snapshotStore.snapshots.first
+         }()
 
-    // Build a StatsSnapshot for events since a given date using system play count deltas from snapshots
-    private func computeSnapshot(since start: Date) -> StatsSnapshot {
-        // Determine baseline snapshot:
-        // - For Custom window, prefer custom baseline if present and newer than start.
-        // - Otherwise, use the latest snapshot taken on/before `start`.
-        let baseline: PlayCountSnapshot? = {
-            if let custom = snapshotStore.getCustomBaseline(), custom.date >= start {
-                return custom
-            }
-            if let snap = snapshotStore.snapshot(beforeOrOn: start) {
-                return snap
-            }
-            // Fallback: use earliest snapshot so we report plays since the first snapshot, not absolute counts
-            return snapshotStore.snapshots.first
-        }()
+        // Current counts from cached library (no app-logged events)
+        let currentSongs = mediaStore.allSongs
+         var currentCounts: [UInt64: Int] = [:]
+         currentCounts.reserveCapacity(currentSongs.count)
+         for it in currentSongs {
+             currentCounts[it.persistentID] = it.playCount
+         }
 
-        // Current counts from system (no app-logged events)
-        let currentSongs = MPMediaQuery.songs().items ?? []
-        var currentCounts: [UInt64: Int] = [:]
-        currentCounts.reserveCapacity(currentSongs.count)
-        for it in currentSongs {
-            currentCounts[it.persistentID] = it.playCount
-        }
+         guard let baselineCounts = baseline?.counts else {
+             // If absolutely no snapshots exist, return an empty snapshot
+             return StatsSnapshot(
+                 uniqueSongCount: 0,
+                 totalPlayDuration: 0,
+                 mostPlayedSong: nil,
+                 mostPlayedSongCount: nil,
+                 mostPlayedPlaylist: nil
+             )
+         }
 
-        guard let baselineCounts = baseline?.counts else {
-            // If absolutely no snapshots exist, return an empty snapshot
-            return StatsSnapshot(
-                uniqueSongCount: 0,
-                totalPlayDuration: 0,
-                mostPlayedSong: nil,
-                mostPlayedSongCount: nil,
-                mostPlayedPlaylist: nil
-            )
-        }
+         // Compute deltas (plays within the window)
+         var deltaCounts: [UInt64: Int] = [:]
+         for (id, now) in currentCounts {
+             let then = baselineCounts[id] ?? 0
+             let delta = max(0, now - then)
+             if delta > 0 { deltaCounts[id] = delta }
+         }
 
-        // Compute deltas (plays within the window)
-        var deltaCounts: [UInt64: Int] = [:]
-        for (id, now) in currentCounts {
-            let then = baselineCounts[id] ?? 0
-            let delta = max(0, now - then)
-            if delta > 0 { deltaCounts[id] = delta }
-        }
+         let ids = Set(deltaCounts.keys)
+         // Lookup from cached library
+         let itemsByID: [UInt64: MPMediaItem] = {
+             var map: [UInt64: MPMediaItem] = [:]
+             for it in mediaStore.allSongs where ids.contains(it.persistentID) {
+                 map[it.persistentID] = it
+             }
+             return map
+         }()
 
-        let ids = Set(deltaCounts.keys)
-        let itemsByID = lookupMediaItems(for: ids)
+         // Duration = sum(delta * track duration)
+         var totalDuration: TimeInterval = 0
+         var mostPlayed: (id: UInt64, count: Int, duration: TimeInterval)? = nil
+         for (id, count) in deltaCounts {
+             guard let item = itemsByID[id] else { continue }
+             let contribution = Double(count) * item.playbackDuration
+             totalDuration += contribution
+             let current = (id: id, count: count, duration: contribution)
+             if let best = mostPlayed {
+                 if current.count > best.count || (current.count == best.count && current.duration > best.duration) {
+                     mostPlayed = current
+                 }
+             } else {
+                 mostPlayed = current
+             }
+         }
 
-        // Duration = sum(delta * track duration)
-        var totalDuration: TimeInterval = 0
-        var mostPlayed: (id: UInt64, count: Int, duration: TimeInterval)? = nil
-        for (id, count) in deltaCounts {
-            guard let item = itemsByID[id] else { continue }
-            let contribution = Double(count) * item.playbackDuration
-            totalDuration += contribution
-            let current = (id: id, count: count, duration: contribution)
-            if let best = mostPlayed {
-                if current.count > best.count || (current.count == best.count && current.duration > best.duration) {
-                    mostPlayed = current
-                }
-            } else {
-                mostPlayed = current
-            }
-        }
+         let mostPlayedSong = mostPlayed.flatMap { itemsByID[$0.id] }
 
-        let mostPlayedSong = mostPlayed.flatMap { itemsByID[$0.id] }
+         // Most played playlist = among the user-selected playlists only.
+         // If none are selected or there is no overlap, result is nil.
+         let uniqueIDs = ids
+         var best: (playlist: MPMediaPlaylist, count: Int)? = nil
+         for pl in allPlaylists {
+             // Consider only playlists the user selected in the Playlists tab
+             guard selectedPlaylistIDs.contains(pl.persistentID) else { continue }
+             let idsInPlaylist = Set(pl.items.map { $0.persistentID })
+             let overlapCount = idsInPlaylist.intersection(uniqueIDs).count
+             if overlapCount > 0 {
+                 if let currentBest = best {
+                     if overlapCount > currentBest.count {
+                         best = (pl, overlapCount)
+                     }
+                 } else {
+                     best = (pl, overlapCount)
+                 }
+             }
+         }
+         let mostPlaylist = best?.playlist
 
-        // Most played playlist = among the user-selected playlists only.
-        // If none are selected or there is no overlap, result is nil.
-        let uniqueIDs = ids
-        var best: (playlist: MPMediaPlaylist, count: Int)? = nil
-        for pl in allPlaylists {
-            // Consider only playlists the user selected in the Playlists tab
-            guard selectedPlaylistIDs.contains(pl.persistentID) else { continue }
-            let idsInPlaylist = Set(pl.items.map { $0.persistentID })
-            let overlapCount = idsInPlaylist.intersection(uniqueIDs).count
-            if overlapCount > 0 {
-                if let currentBest = best {
-                    if overlapCount > currentBest.count {
-                        best = (pl, overlapCount)
-                    }
-                } else {
-                    best = (pl, overlapCount)
-                }
-            }
-        }
-        let mostPlaylist = best?.playlist
+         return StatsSnapshot(
+             uniqueSongCount: uniqueIDs.count,
+             totalPlayDuration: totalDuration,
+             mostPlayedSong: mostPlayedSong,
+             mostPlayedSongCount: mostPlayed?.count,
+             mostPlayedPlaylist: mostPlaylist
+         )
+     }
 
-        return StatsSnapshot(
-            uniqueSongCount: uniqueIDs.count,
-            totalPlayDuration: totalDuration,
-            mostPlayedSong: mostPlayedSong,
-            mostPlayedSongCount: mostPlayed?.count,
-            mostPlayedPlaylist: mostPlaylist
-        )
-    }
+     // MARK: - Export helpers
+     private func exportSnapshotsTXT() throws -> URL {
+         let text = buildSnapshotsText()
+         let df = DateFormatter()
+         df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+         let filename = "PlayHistorySnapshots_\(df.string(from: Date())).txt"
+         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+         try text.write(to: url, atomically: true, encoding: .utf8)
+         return url
+     }
 
-    // MARK: - Export helpers
-    private func exportSnapshotsTXT() throws -> URL {
-        let text = buildSnapshotsText()
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let filename = "PlayHistorySnapshots_\(df.string(from: Date())).txt"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try text.write(to: url, atomically: true, encoding: .utf8)
-        return url
-    }
+     private func buildSnapshotsText() -> String {
+         var out: [String] = []
+         let dateFmt = DateFormatter()
+         dateFmt.dateStyle = .medium
+         dateFmt.timeStyle = .short
 
-    private func buildSnapshotsText() -> String {
-        var out: [String] = []
-        let dateFmt = DateFormatter()
-        dateFmt.dateStyle = .medium
-        dateFmt.timeStyle = .short
+         // Summary
+         out.append("=== Play History Snapshots ===")
+         if let last = snapshotStore.snapshots.last?.date {
+             out.append("Last snapshot: \(dateFmt.string(from: last))")
+         } else {
+             out.append("Last snapshot: —")
+         }
 
-        // Summary
-        out.append("=== Play History Snapshots ===")
-        if let last = snapshotStore.snapshots.last?.date {
-            out.append("Last snapshot: \(dateFmt.string(from: last))")
-        } else {
-            out.append("Last snapshot: —")
-        }
+         if let custom = snapshotStore.getCustomBaseline()?.date {
+             out.append("Custom baseline snapshot: \(dateFmt.string(from: custom))")
+         } else {
+             out.append("Custom baseline snapshot: —")
+         }
+         out.append("")
 
-        if let custom = snapshotStore.getCustomBaseline()?.date {
-            out.append("Custom baseline snapshot: \(dateFmt.string(from: custom))")
-        } else {
-            out.append("Custom baseline snapshot: —")
-        }
-        out.append("")
+         // Resolve metadata for nicer lines from cached library
+         let allItems = mediaStore.allSongs
+         var itemByID: [UInt64: MPMediaItem] = [:]
+         itemByID.reserveCapacity(allItems.count)
+         for it in allItems { itemByID[it.persistentID] = it }
 
-        // Resolve metadata for nicer lines
-        let allItems = MPMediaQuery.songs().items ?? []
-        var itemByID: [UInt64: MPMediaItem] = [:]
-        itemByID.reserveCapacity(allItems.count)
-        for it in allItems { itemByID[it.persistentID] = it }
+         // Index
+         out.append("=== Snapshot Index ===")
+         if snapshotStore.snapshots.isEmpty {
+             out.append("- (no snapshots)")
+         } else {
+             for snap in snapshotStore.snapshots {
+                 let tracked = snap.counts.count
+                 let sumCounts = snap.counts.values.reduce(0, +)
+                 out.append("- \(dateFmt.string(from: snap.date)) | tracks tracked: \(tracked), total playCount sum: \(sumCounts)")
+             }
+         }
+         out.append("")
 
-        // Index
-        out.append("=== Snapshot Index ===")
-        if snapshotStore.snapshots.isEmpty {
-            out.append("- (no snapshots)")
-        } else {
-            for snap in snapshotStore.snapshots {
-                let tracked = snap.counts.count
-                let sumCounts = snap.counts.values.reduce(0, +)
-                out.append("- \(dateFmt.string(from: snap.date)) | tracks tracked: \(tracked), total playCount sum: \(sumCounts)")
-            }
-        }
-        out.append("")
+         // Details (top 20 by count)
+         for snap in snapshotStore.snapshots {
+             out.append("=== Snapshot @ \(dateFmt.string(from: snap.date)) ===")
+             let top = snap.counts.sorted { $0.value > $1.value }.prefix(20)
+             if top.isEmpty {
+                 out.append("(no items)")
+             } else {
+                 for (id, c) in top {
+                     if let it = itemByID[id] {
+                         let title = it.title ?? "Unknown Title"
+                         let artist = it.artist ?? "Unknown Artist"
+                         out.append("• \(title) — \(artist) | count: \(c)")
+                     } else {
+                         out.append("• [\(id)] | count: \(c)")
+                     }
+                 }
+             }
+             out.append("")
+         }
 
-        // Details (top 20 by count)
-        for snap in snapshotStore.snapshots {
-            out.append("=== Snapshot @ \(dateFmt.string(from: snap.date)) ===")
-            let top = snap.counts.sorted { $0.value > $1.value }.prefix(20)
-            if top.isEmpty {
-                out.append("(no items)")
-            } else {
-                for (id, c) in top {
-                    if let it = itemByID[id] {
-                        let title = it.title ?? "Unknown Title"
-                        let artist = it.artist ?? "Unknown Artist"
-                        out.append("• \(title) — \(artist) | count: \(c)")
-                    } else {
-                        out.append("• [\(id)] | count: \(c)")
-                    }
-                }
-            }
-            out.append("")
-        }
+         // Baselines used for windows
+         let weekStart = Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+         let monthStart = Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+         let weekSnap = snapshotStore.snapshot(beforeOrOn: weekStart)
+         let monthSnap = snapshotStore.snapshot(beforeOrOn: monthStart)
+         let earliest = snapshotStore.snapshots.first?.date
 
-        // Baselines used for windows
-        let weekStart = Calendar.current.date(byAdding: .day, value: -7, to: Date())!
-        let monthStart = Calendar.current.date(byAdding: .day, value: -30, to: Date())!
-        let weekSnap = snapshotStore.snapshot(beforeOrOn: weekStart)
-        let monthSnap = snapshotStore.snapshot(beforeOrOn: monthStart)
-        let earliest = snapshotStore.snapshots.first?.date
+         out.append("=== Window Baselines ===")
+         if let w = weekSnap?.date {
+             out.append("7d baseline: \(dateFmt.string(from: w))")
+         } else if let e = earliest {
+             out.append("7d baseline: \(dateFmt.string(from: e)) (earliest snapshot; no snapshot existed on/before window start)")
+         } else {
+             out.append("7d baseline: — (no snapshots available)")
+         }
 
-        out.append("=== Window Baselines ===")
-        if let w = weekSnap?.date {
-            out.append("7d baseline: \(dateFmt.string(from: w))")
-        } else if let e = earliest {
-            out.append("7d baseline: \(dateFmt.string(from: e)) (earliest snapshot; no snapshot existed on/before window start)")
-        } else {
-            out.append("7d baseline: — (no snapshots available)")
-        }
+         if let m = monthSnap?.date {
+             out.append("30d baseline: \(dateFmt.string(from: m))")
+         } else if let e = earliest {
+             out.append("30d baseline: \(dateFmt.string(from: e)) (earliest snapshot; no snapshot existed on/before window start)")
+         } else {
+             out.append("30d baseline: — (no snapshots available)")
+         }
 
-        if let m = monthSnap?.date {
-            out.append("30d baseline: \(dateFmt.string(from: m))")
-        } else if let e = earliest {
-            out.append("30d baseline: \(dateFmt.string(from: e)) (earliest snapshot; no snapshot existed on/before window start)")
-        } else {
-            out.append("30d baseline: — (no snapshots available)")
-        }
+         return out.joined(separator: "\n")
+     }
 
-        return out.joined(separator: "\n")
-    }
+     // MARK: - Cards & UI
 
-    private func lookupMediaItems(for ids: Set<UInt64>) -> [UInt64: MPMediaItem] {
-        guard !ids.isEmpty else { return [:] }
-        var result: [UInt64: MPMediaItem] = [:]
-        // Query all songs once and map — simple and effective for local libraries
-        let all = MPMediaQuery.songs().items ?? []
-        for it in all {
-            if ids.contains(it.persistentID) {
-                result[it.persistentID] = it
-            }
-        }
-        return result
-    }
+     private func statsCard(title: String, snapshot: StatsSnapshot) -> some View {
+         VStack(alignment: .leading, spacing: 8) {
+             Text(title)
+                 .frame(maxWidth: .infinity, alignment: .center) // centers horizontally
+                 .padding(.top, 8)                               // adds a little space above
+                 .padding(.bottom, -4)
+             cardContent(for: snapshot)
+         }
+         .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
+         .padding(.horizontal)
+     }
 
-    // MARK: - Cards & UI
+     private func cardContent(for snapshot: StatsSnapshot) -> some View {
+         VStack(alignment: .leading, spacing: 8) {
+             HStack {
+                 Label("\(snapshot.uniqueSongCount)", systemImage: "play.square.stack")
+                 Spacer()
+                 Label(formatTime(snapshot.totalPlayDuration), systemImage: "clock")
+             }
+             .font(.subheadline)
+             .foregroundColor(.primary)
 
-    private func statsCard(title: String, snapshot: StatsSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .frame(maxWidth: .infinity, alignment: .center) // centers horizontally
-                .padding(.top, 8)                               // adds a little space above
-                .padding(.bottom, -4)
-            cardContent(for: snapshot)
-        }
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.15)))
-        .padding(.horizontal)
-    }
+             Divider()
+             HStack(alignment: .top, spacing: 24) {
+                 HStack(alignment: .top, spacing: 12) {
+                     Image(systemName: "music.mic")
+                     VStack(alignment: .leading, spacing: 2) {
+                         Text("Most Played Song")
+                             .font(.caption)
+                             .foregroundColor(.secondary)
+                         Text({
+                             guard let title = snapshot.mostPlayedSong?.title else { return "—" }
+                             if let c = snapshot.mostPlayedSongCount, c > 0 {
+                                 return "\(title) (\(c))"
+                             }
+                             return title
+                         }())
+                         .font(.body)
+                         .lineLimit(2)
+                     }
+                 }
 
-    private func cardContent(for snapshot: StatsSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("\(snapshot.uniqueSongCount)", systemImage: "play.circle")
-                Spacer()
-                Label(formatTime(snapshot.totalPlayDuration), systemImage: "clock")
-            }
-            .font(.subheadline)
-            .foregroundColor(.primary)
+                 HStack(alignment: .top, spacing: 12) {
+                     Image(systemName: "music.note.list")
+                     VStack(alignment: .leading, spacing: 2) {
+                         Text("Most Played Playlist")
+                             .font(.caption)
+                             .foregroundColor(.secondary)
+                         Text(snapshot.mostPlayedPlaylist?.name ?? "—")
+                             .font(.body)
+                             .lineLimit(2)
+                     }
+                 }
+             }
+         }
+         .padding()
+     }
 
-            Divider()
-            HStack(alignment: .top, spacing: 24) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "music.mic")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Most Played Song")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text({
-                            guard let title = snapshot.mostPlayedSong?.title else { return "—" }
-                            if let c = snapshot.mostPlayedSongCount, c > 0 {
-                                return "\(title) (\(c))"
-                            }
-                            return title
-                        }())
-                        .font(.body)
-                        .lineLimit(2)
-                    }
-                }
-
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "music.note.list")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Most Played Playlist")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text(snapshot.mostPlayedPlaylist?.name ?? "—")
-                            .font(.body)
-                            .lineLimit(2)
-                    }
-                }
-            }
-        }
-        .padding()
-    }
-
-    private func formatTime(_ time: TimeInterval) -> String {
-        if time >= 86400 {
-            let days = time / 86400
-            return String(format: "%.1f d", days)
-        }
-        let hours = Int(time) / 3600
-        let minutes = (Int(time) % 3600) / 60
-        if hours > 0 {
-            return String(format: "%02dh %02dm", hours, minutes)
-        } else {
-            return String(format: "%02dm", minutes)
-        }
-    }
+     private func formatTime(_ time: TimeInterval) -> String {
+         if time >= 86400 {
+             let days = time / 86400
+             return String(format: "%.1f d", days)
+         }
+         let hours = Int(time) / 3600
+         let minutes = (Int(time) % 3600) / 60
+         return hours > 0 ? String(format: "%02dh %02dm", hours, minutes) : String(format: "%02dm", minutes)
+     }
 }
