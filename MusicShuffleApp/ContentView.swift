@@ -7,10 +7,13 @@ import UIKit
 struct MusicShuffleApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var mediaStore = MediaLibraryStore()
+    // Add CollectionsStore so Collections tab can access persisted collections
+    @StateObject private var collectionsStore = CollectionsStore()
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(mediaStore)
+                .environmentObject(collectionsStore)
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
@@ -48,6 +51,14 @@ struct ContentView: View {
             }
             .tabItem {
                 Label("Playlists", systemImage: "music.note.list")
+            }
+
+            // New Tab: Collections
+            NavigationView {
+                CollectionsTabView(musicPlayerHelper: musicPlayerHelper)
+            }
+            .tabItem {
+                Label("Collections", systemImage: "square.grid.2x2")
             }
 
             // Tab 2: Stats
