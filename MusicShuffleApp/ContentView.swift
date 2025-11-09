@@ -1549,14 +1549,14 @@ struct StatsView: View {
                 VStack(spacing: 12) {
                     Button {
                         do {
-                            let url = try exportSnapshotsTXT()
+                            let url = try exportSnapshotsCSV()
                             exportURL = url
                             showingShare = true
                         } catch {
                             print("Export failed: \(error)")
                         }
                     } label: {
-                        Label("Export Snapshots (TXT)", systemImage: "square.and.arrow.up")
+                        Label("Export Snapshots (CSV)", systemImage: "square.and.arrow.up")
                     }
 
                     Button(isSelectMode ? "Done" : "Select Stats Playlists") {
@@ -1785,6 +1785,101 @@ struct StatsView: View {
          }
 
          return out.joined(separator: "\n")
+     }
+
+     // New: CSV export per requirements
+     private func exportSnapshotsCSV() throws -> URL {
+         let csv = buildSnapshotsCSV()
+         let df = DateFormatter()
+         df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+         let filename = "PlayHistorySnapshots_\(df.string(from: Date())).csv"
+         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+         try csv.write(to: url, atomically: true, encoding: .utf8)
+         return url
+     }
+
+     private func buildSnapshotsCSV() -> String {
+         let snaps = PlayCountSnapshotStore.shared.snapshots.sorted { $0.date < $1.date }
+         guard !snaps.isEmpty else {
+             return "No snapshots available"
+         }
+
+         // Header: first column label, then snapshot dates
+         let dateFmt = DateFormatter()
+         dateFmt.dateFormat = "yyyy-MM-dd"
+         var rows: [String] = []
+
+         func q(_ s: String) -> String {
+             var v = s.replacingOccurrences(of: "\"", with: "\"\"")
+             // Also normalize newlines
+             v = v.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+             return "\"" + v + "\""
+         }
+
+         let header = ["Label"] + snaps.map { dateFmt.string(from: $0.date) }
+         rows.append(header.map { q($0) }.joined(separator: ","))
+
+         // Baseline rows
+         let now = Date()
+         let weekStart = Calendar.current.date(byAdding: .day, value: -7, to: now)!
+         let monthStart = Calendar.current.date(byAdding: .day, value: -30, to: now)!
+         let weekSnap = PlayCountSnapshotStore.shared.snapshot(beforeOrOn: weekStart)
+         let monthSnap = PlayCountSnapshotStore.shared.snapshot(beforeOrOn: monthStart)
+         let customSnap = PlayCountSnapshotStore.shared.getCustomBaseline()
+
+         func baselineRow(label: String, baseline: PlayCountSnapshot?) -> [String] {
+             let onesIndex: Int? = baseline.flatMap { b in snaps.firstIndex(where: { $0.date == b.date }) }
+             let vals = snaps.enumerated().map { (idx, _) in (idx == onesIndex) ? "1" : "0" }
+             return [label] + vals
+         }
+
+         rows.append(baselineRow(label: "WeeklyBaseline", baseline: weekSnap).map { q($0) }.joined(separator: ","))
+         rows.append(baselineRow(label: "MonthlyBaseline", baseline: monthSnap).map { q($0) }.joined(separator: ","))
+         rows.append(baselineRow(label: "CustomBaseline", baseline: customSnap).map { q($0) }.joined(separator: ","))
+
+         // Identify songs whose playcount changed between oldest and newest snapshots
+         let oldest = snaps.first!
+         let latest = snaps.last!
+         var allIDs = Set<UInt64>()
+         for s in snaps { allIDs.formUnion(s.counts.keys) }
+
+         // Build library lookup for labels
+         let items = mediaStore.allSongs
+         var itemByID: [UInt64: MPMediaItem] = [:]
+         for it in items { itemByID[it.persistentID] = it }
+
+         // Filter to IDs that changed since oldest snapshot
+         var changedIDs: [(id: UInt64, delta: Int)] = []
+         changedIDs.reserveCapacity(allIDs.count)
+         for id in allIDs {
+             let a = oldest.counts[id] ?? 0
+             let b = latest.counts[id] ?? 0
+             let d = b - a
+             if d != 0 { changedIDs.append((id, d)) }
+         }
+
+         // Sort by descending delta, then by title
+         changedIDs.sort { lhs, rhs in
+             if lhs.delta != rhs.delta { return lhs.delta > rhs.delta }
+             let lt = itemByID[lhs.id]?.title ?? ""
+             let rt = itemByID[rhs.id]?.title ?? ""
+             return lt.localizedCaseInsensitiveCompare(rt) == .orderedAscending
+         }
+
+         // Emit one row per song with counts across snapshots
+         for (id, _) in changedIDs {
+             let title = itemByID[id]?.title ?? "Unknown Title"
+             let artist = itemByID[id]?.artist ?? "Unknown Artist"
+             let label = "\(title) — \(artist) [\(id)]"
+             let countsAcross = snaps.map { snap -> String in
+                 let v = snap.counts[id] ?? 0
+                 return String(v)
+             }
+             let row = [label] + countsAcross
+             rows.append(row.map { q($0) }.joined(separator: ","))
+         }
+
+         return rows.joined(separator: "\n")
      }
 
      // MARK: - Cards & UI
